@@ -11,3 +11,5 @@ data/downloads/
 *.sqlite-journal
 .venv/
 *.log
+*.sqlite-wal
+*.sqlite-shm
