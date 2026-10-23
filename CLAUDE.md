@@ -25,7 +25,10 @@ Paper trading only.
 | `risk.py` | `RiskManager`: worst-case loss = stop + spread + slippage + gap allowance; must fit remaining daily AND trailing buffer; sizing from buffer; soft daily stop; de-risk near target; conservative funded profile |
 | `data/` | `loader.py` CSV auto-detect (MT4/MT5/HistData/Dukascopy/generic), `clean.py` (dedupe, gaps, tz->UTC, sanity), `store.py` parquet, `dukascopy.py`, `histdata.py`, `github_mirror.py` (M15 MT exports, server time = NY+7h), `synthetic.py` |
 | `strategies/indicators.py` | numpy/numba indicators (SMA, EMA, RSI, MACD, BB, ATR, ADX, Stoch, Donchian, swings) |
-| `strategies/blocks.py` | building-block registry: ENTRIES (patterns, breakouts, MR, trend, momentum/streak, gaps, S/R), FILTERS (session, DOW, vol regime, ADX, MTF trend, candle size), EXITS (ATR SL/TP, R-multiple, time stop, trailing), SIZING |
+| `strategies/blocks.py` | building-block registry + `Ctx` (bars, cached indicators, `peers` for intermarket, `train_end`): ENTRIES, FILTERS, EXIT_SPACE (ATR/swing/bar SL, R TP, time stop incl. -1 = P5 signal-decay, close/chandelier trail, breakeven, partial_r, exit_mode ema20/sma5/bb_mid/rsi50/channel/session_end), SIZING_SPACE, OVERLAY_SPACE |
+| `strategies/blocks_ext.py` | catalogue sections A-L, N, O (+ regime filters choppiness/autocorr/hurst/premium-discount) |
+| `strategies/blocks_intermarket.py` | section M + H5/H6: gold laggard, JPY risk filter, triangulation, lead-lag, safe-haven filter, basket strength, pair divergence, correlation breakdown |
+| `strategies/blocks_meta.py` | section P: vote_ensemble, regime_router (also H4), ml_classifier (walk-forward HistGradientBoosting, yearly refit) |
 | `strategies/genome.py` | `StrategyGenome` (entry+filters+exit+params, json-serialisable, hash id), random generation, mutation, crossover |
 | `strategies/backtest.py` | numba bar-by-bar engine -> trade list with pnl in R, MAE/MFE in R, order flag, stop distance, timestamps |
 | `evaluation/challenge.py` | simulated challenges: many random start dates x Monte Carlo trade reshuffle/bootstrapping through `Account`+`RiskManager`+rules => P(pass) per stage, median days, breach causes, funded survival & payouts |
@@ -42,6 +45,11 @@ Paper trading only.
 - Floating-equity violations use per-trade MAE/MFE plus a flag for which came first, so the trailing
   floor is ratcheted by MFE before MAE only when MFE truly happened first.
 - One position at a time per strategy (portfolio-level overlaps happen on the floor).
+- Account tactics (catalogue J, P3, P4, Q) are genome `overlay` params applied by `RiskManager.size`
+  (profit cap, max trades/day, loss-streak cooldown, fast-pass, buffer-proportional risk, target banking,
+  anti-martingale) and by `ChallengeSimulator` (P3 equity-curve filter). P7 rotation = `floor run --rotate-top N`.
+- Blocks that fit statistics (time buckets, session drift, ML, P5 hold) use strictly-past / in-sample data only;
+  `tests/test_strategies.py::test_all_blocks_run_without_lookahead` and `tests/test_catalog.py` enforce causality.
 - Anti-overfitting: every evaluated genome increments the trial counter; DSR uses it. A strategy is
   "validated" only if IS, every walk-forward fold, and the untouched OOS holdout all clear gates.
 - Synthetic data is never eligible for validation (data provenance stored per dataset).

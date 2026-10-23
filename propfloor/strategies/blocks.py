@@ -40,7 +40,31 @@ class Ctx:
         rolled = ny + pd.Timedelta(hours=7)  # FX day starts 17:00 NY
         self.dow = rolled.weekday.to_numpy()
         self.day_id = (rolled.normalize().asi8 // 86_400_000_000_000).astype(np.int64)
+        self.v = df["volume"].to_numpy(np.float64) if "volume" in df else np.ones(self.n)
+        self.peers: dict[str, "Ctx"] = {}  # other symbols on the same timeframe (intermarket blocks)
+        self.train_end: pd.Timestamp | None = None  # in-sample end; statistics-fitting blocks must not look past it
         self._cache: dict[Any, Any] = {}
+
+    def peer_close(self, sym: str) -> np.ndarray | None:
+        """Close of another symbol aligned to this context's bars (forward-filled, causal)."""
+        if sym == self.symbol:
+            return self.c
+        p = self.peers.get(sym)
+        if p is None:
+            return None
+        return self.get(("peer", sym), lambda: pd.Series(p.c, index=p.time).reindex(self.time, method="ffill",
+                                                                                    limit=8).to_numpy())
+
+    @property
+    def train_mask(self) -> np.ndarray:
+        """True for bars inside the in-sample period (default: first 75%)."""
+        def f():
+            if self.train_end is None:
+                m = np.zeros(self.n, bool)
+                m[: int(self.n * 0.75)] = True
+                return m
+            return np.asarray(self.time < self.train_end)
+        return self.get("train_mask", f)
 
     def get(self, key, fn: Callable[[], Any]):
         if key not in self._cache:
@@ -481,15 +505,60 @@ EXIT_SPACE: Space = {
     "sl_type": ("choice", ["atr", "swing", "bar"]),
     "sl_atr": ("float", 0.75, 4.0),
     "tp_r": ("choice", [0.0, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0]),
-    "time_stop": ("int", 0, 72),
+    "time_stop": ("choice", [0, 0, 6, 12, 24, 48, 72, -1]),  # -1 = signal-decay optimal hold (P5), fitted in-sample
     "trail_atr": ("choice", [0.0, 0.0, 1.5, 2.0, 3.0]),
-    "breakeven_r": ("choice", [0.0, 0.0, 1.0, 1.5]),
+    "trail_type": ("choice", ["close", "chandelier"]),
+    "breakeven_r": ("choice", [0.0, 0.0, 0.5, 1.0, 1.5]),
+    "partial_r": ("choice", [0.0, 0.0, 0.0, 0.75, 1.0, 1.5]),  # I / Q6: bank half early (trailing-floor aware)
     "exit_opposite": ("choice", [True, False]),
+    "exit_mode": ("choice", ["none", "none", "none", "ema20", "sma5", "bb_mid", "rsi50", "channel", "session_end"]),
+    "exit_n": ("int", 10, 20),  # opposite-channel length for exit_mode=channel
+    "exit_hour": ("int", 15, 21),  # UTC hour for exit_mode=session_end
 }
 SIZING_SPACE: Space = {
-    "risk_per_trade": ("choice", [0.0025, 0.004, 0.005, 0.0075, 0.01]),
+    "risk_per_trade": ("choice", [0.001, 0.0025, 0.004, 0.005, 0.0075, 0.01]),
 }
-TIMEFRAMES = ["M15", "M30", "H1", "H4"]
+# Account-level overlays (sections J, P3/P4, Q) applied by the risk manager / challenge simulator.
+OVERLAY_SPACE: Space = {
+    "soft_daily_stop": ("choice", [0.33, 0.5, 0.6, 0.8]),        # share of the daily limit (1.0-2.5% of a 3% limit)
+    "daily_profit_cap": ("choice", [0.0, 0.0, 0.01, 0.015, 0.02]),  # J profit lock / Q4
+    "max_trades_per_day": ("choice", [0, 0, 1, 2, 3]),             # Q5
+    "loss_streak_n": ("choice", [0, 0, 2, 3, 4]),                  # J losing-streak cooldown
+    "loss_streak_mult": ("choice", [0.0, 0.5]),                    # 0 = pause rest of day, 0.5 = halve size
+    "fast_pass_mult": ("choice", [1.0, 1.0, 1.25, 1.5]),           # Q1 (stage 1, until fast_pass_until of target banked)
+    "fast_pass_until": ("choice", [0.5]),
+    "buffer_risk_frac": ("choice", [0.0, 0.0, 0.1, 0.15, 0.2]),    # Q2 risk = frac x distance to trailing floor
+    "derisk_within": ("choice", [0.0, 0.02]),                      # J halve risk within 2% of target
+    "target_banking": ("choice", [True, False]),                   # Q3
+    "anti_martingale_step": ("choice", [0.0, 0.0, 0.001, 0.0025]),  # P4 (+% risk per consecutive win)
+    "equity_curve_n": ("choice", [0, 0, 0, 10, 20]),               # P3 trade only above own equity MA
+}
+TIMEFRAMES = ["M15", "M30", "H1", "H4", "D1"]
+
+
+def exit_signals(x: "Ctx", e: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Signal-based exits (closing a long when xl is True, a short when xs is True)."""
+    mode = e.get("exit_mode", "none")
+    z = np.zeros(x.n, bool)
+    if mode == "ema20":
+        m = x.ma(20)
+        return _b(x.c >= m), _b(x.c <= m)
+    if mode == "sma5":
+        m = x.ma(5, "sma")
+        return _b(x.c > m), _b(x.c < m)
+    if mode == "bb_mid":
+        m = x.ma(20, "sma")
+        return _b(x.c >= m), _b(x.c <= m)
+    if mode == "rsi50":
+        r = x.rsi(14)
+        return _b(r >= 50), _b(r <= 50)
+    if mode == "channel":
+        n = int(e.get("exit_n", 10))
+        return _b(x.c < _s(ind.rolling_min(x.l, n))), _b(x.c > _s(ind.rolling_max(x.h, n)))
+    if mode == "session_end":
+        a = x.hour == int(e.get("exit_hour", 20))
+        return a, a
+    return z, z
 
 
 def sample_param(spec: tuple, rng: np.random.Generator):
@@ -504,3 +573,7 @@ def sample_param(spec: tuple, rng: np.random.Generator):
 
 def sample_params(space: Space, rng: np.random.Generator) -> dict:
     return {k: sample_param(v, rng) for k, v in space.items()}
+
+
+# extended catalogues register themselves on import
+from propfloor.strategies import blocks_ext, blocks_intermarket, blocks_meta  # noqa: E402,F401

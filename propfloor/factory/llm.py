@@ -11,7 +11,7 @@ import logging
 import os
 import re
 
-from propfloor.strategies.blocks import ENTRIES, EXIT_SPACE, FILTERS, SIZING_SPACE
+from propfloor.strategies.blocks import ENTRIES, EXIT_SPACE, FILTERS, OVERLAY_SPACE, SIZING_SPACE
 from propfloor.strategies.genome import Component, StrategyGenome
 
 log = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ def catalogue() -> str:
     return json.dumps({
         "entries": {n: {"family": b.family, "params": spec(b.space)} for n, b in ENTRIES.items()},
         "filters": {n: spec(b.space) for n, b in FILTERS.items()},
-        "exit": spec(EXIT_SPACE), "sizing": spec(SIZING_SPACE),
+        "exit": spec(EXIT_SPACE), "sizing": spec(SIZING_SPACE), "overlay": spec(OVERLAY_SPACE),
     })
 
 
@@ -83,7 +83,8 @@ class ClaudeResearcher:
             f"Recent rejected candidates and why:\n{json.dumps(failures)[:4000]}\n\n"
             f"Propose {n} NEW, diverse strategies. Reply with ONLY a JSON array; each item: "
             '{"symbol":..,"tf":..,"entry":{"name":..,"params":{..}},"filters":[{"name":..,"params":{..}}],'
-            '"exit":{..all exit keys..},"sizing":{"risk_per_trade":..},"direction":"both|long|short","rationale":".."}'
+            '"exit":{..all exit keys..},"sizing":{"risk_per_trade":..},"overlay":{..account tactics..},'
+            '"direction":"both|long|short","rationale":".."}'
         )
         return parse_genomes(self._ask(prompt, "propose"))
 
@@ -138,4 +139,4 @@ def coerce(d: dict) -> StrategyGenome | None:
         tf=d.get("tf", "H1"), entry=Component(e["name"], _clip(e.get("params", {}), ENTRIES[e["name"]].space)),
         filters=filters[:3], exit=_clip(d.get("exit", {}), EXIT_SPACE), sizing=_clip(d.get("sizing", {}), SIZING_SPACE),
         direction=d.get("direction", "both") if d.get("direction") in ("both", "long", "short") else "both",
-        symbol=d.get("symbol", "EURUSD"), origin="llm")
+        symbol=d.get("symbol", "EURUSD"), origin="llm", overlay=_clip(d.get("overlay", {}), OVERLAY_SPACE))

@@ -18,8 +18,12 @@ REASONS = {0: "stop", 1: "target", 2: "time", 3: "opposite", 4: "weekend", 5: "e
 
 
 @njit(cache=True)
-def _run(o, h, l, c, atr, go_long, go_short, force_flat, swing_lo, swing_hi,
-         sl_type, sl_atr, tp_r, time_stop, trail_atr, be_r, exit_opp, cost):
+def _run(o, h, l, c, atr, go_long, go_short, force_flat, swing_lo, swing_hi, exit_long, exit_short,
+         sl_type, sl_atr, tp_r, time_stop, trail_atr, be_r, cost, partial_r, trail_type):
+    """exit_long/exit_short: signal exits evaluated at bar close (mean targets, channels, session end...).
+    partial_r > 0: close half at +partial_r R and move the stop to breakeven (trailing-floor protection).
+    trail_type 0: close - k*ATR; 1: chandelier (extreme since entry - k*ATR).
+    MAE/MFE/post are measured on the remaining exposure plus banked partial profit, in R of the full size."""
     n = o.shape[0]
     out = np.zeros((n, 13))
     k = 0
@@ -34,6 +38,9 @@ def _run(o, h, l, c, atr, go_long, go_short, force_flat, swing_lo, swing_hi,
     mae_i = 0
     mfe_i = 0
     post = 0.0
+    size = 1.0
+    banked = 0.0
+    ext = 0.0
     i = 0
     while i < n - 1:
         if pos == 0:
@@ -67,49 +74,60 @@ def _run(o, h, l, c, atr, go_long, go_short, force_flat, swing_lo, swing_hi,
                 mae_i = ei
                 mfe_i = ei
                 post = 0.0
+                size = 1.0
+                banked = 0.0
+                ext = ep
             i += 1
             continue
         # in position: bar i (i >= ei)
         reason = -1
         xp = 0.0
-        adv = (l[i] - entry) * pos if pos == 1 else (h[i] - entry) * pos
-        fav = (h[i] - entry) * pos if pos == 1 else (l[i] - entry) * pos
+        worst = l[i] if pos == 1 else h[i]
+        best = h[i] if pos == 1 else l[i]
         hit_stop = (l[i] <= stop) if pos == 1 else (h[i] >= stop)
         hit_tgt = False
         if not np.isnan(tgt):
             hit_tgt = (h[i] >= tgt) if pos == 1 else (l[i] <= tgt)
+        # partial take-profit (only if the stop is not hit in the same bar: pessimistic)
+        if partial_r > 0 and size == 1.0 and not hit_stop and (best - entry) * pos >= partial_r * dist:
+            banked = 0.5 * partial_r
+            size = 0.5
+            if (stop - entry) * pos < 0:
+                stop = entry
         if hit_stop:
             xp = min(o[i], stop) if pos == 1 else max(o[i], stop)
             reason = 0 if (stop - entry) * pos < 0 else 6
-            adv = min(adv, (xp - entry) * pos)
+            worst = xp if (xp - worst) * pos < 0 else worst
         elif hit_tgt:
             xp = max(o[i], tgt) if pos == 1 else min(o[i], tgt)
             reason = 1
-            fav = (xp - entry) * pos
+            best = xp
         elif force_flat[i]:
             xp = c[i]
             reason = 4
         elif time_stop > 0 and i - ei + 1 >= time_stop:
             xp = c[i]
             reason = 2
-        elif exit_opp and ((pos == 1 and go_short[i]) or (pos == -1 and go_long[i])):
+        elif (pos == 1 and exit_long[i]) or (pos == -1 and exit_short[i]):
             xp = c[i]
             reason = 3
         elif i == n - 2:
             xp = c[i]
             reason = 5
-        if fav / dist > mfe:
-            mfe = fav / dist
+        fav = banked + size * (best - entry) * pos / dist
+        adv = banked + size * (worst - entry) * pos / dist
+        if fav > mfe:
+            mfe = fav
             mfe_i = i
             post = 0.0
-        if adv / dist < mae:
-            mae = adv / dist
+        if adv < mae:
+            mae = adv
             mae_i = i
-        if i > mfe_i and adv / dist < post:
-            post = adv / dist
+        if i > mfe_i and adv < post:
+            post = adv
         if reason >= 0:
             xp_net = xp - pos * cost * 0.5
-            pnl = (xp_net - entry) * pos / dist
+            pnl = banked + size * (xp_net - entry) * pos / dist
             out[k, 0] = ei
             out[k, 1] = i
             out[k, 2] = pos
@@ -128,10 +146,15 @@ def _run(o, h, l, c, atr, go_long, go_short, force_flat, swing_lo, swing_hi,
             # flat now: the loop re-evaluates bar i's close for a new entry at i+1
             continue
         # end-of-bar management (effective next bar)
+        if pos == 1:
+            ext = max(ext, h[i])
+        else:
+            ext = min(ext, l[i])
         if be_r > 0 and mfe >= be_r and (stop - entry) * pos < 0:
             stop = entry
         if trail_atr > 0 and not np.isnan(atr[i]):
-            ns = c[i] - pos * trail_atr * atr[i]
+            ref = c[i] if trail_type == 0 else ext
+            ns = ref - pos * trail_atr * atr[i]
             if (ns - stop) * pos > 0:
                 stop = ns
         i += 1
@@ -147,10 +170,17 @@ def run_backtest(ctx, long_sig: np.ndarray, short_sig: np.ndarray, exit_p: dict,
     sh, sl = ctx.swings(3)
     ff = ctx.get("force_flat", lambda: _force_flat(ctx))
     cost = (spread_pips + 2 * slippage_pips) * ps
+    from propfloor.strategies.blocks import exit_signals
+
+    xl, xs = exit_signals(ctx, exit_p)
+    if exit_p.get("exit_opposite", False):
+        xl = xl | short_sig
+        xs = xs | long_sig
     raw = _run(ctx.o, ctx.h, ctx.l, ctx.c, atr, long_sig.astype(np.bool_), short_sig.astype(np.bool_), ff, sl, sh,
+               xl.astype(np.bool_), xs.astype(np.bool_),
                sl_type, float(exit_p.get("sl_atr", 2.0)), float(exit_p.get("tp_r", 2.0)), int(exit_p.get("time_stop", 0)),
-               float(exit_p.get("trail_atr", 0.0)), float(exit_p.get("breakeven_r", 0.0)), bool(exit_p.get("exit_opposite", False)),
-               cost)
+               float(exit_p.get("trail_atr", 0.0)), float(exit_p.get("breakeven_r", 0.0)), cost,
+               float(exit_p.get("partial_r", 0.0)), 1 if exit_p.get("trail_type", "close") == "chandelier" else 0)
     df = pd.DataFrame(raw, columns=TRADE_COLS)
     for col in ("entry_idx", "exit_idx", "side", "mae_idx", "mfe_idx", "reason"):
         df[col] = df[col].astype(np.int64)

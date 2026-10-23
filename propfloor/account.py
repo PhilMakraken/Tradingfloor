@@ -34,6 +34,8 @@ class AccountState:
     trading_days: set[date] = field(default_factory=set)
     daily_pnl: dict[date, float] = field(default_factory=dict)
     n_trades: int = 0
+    day_trades: dict[date, int] = field(default_factory=dict)  # opens per trading day
+    results: list[float] = field(default_factory=list)  # realised pnl per closed trade
     start_time: pd.Timestamp | None = None
     last_time: pd.Timestamp | None = None
     min_equity_buffer: float = float("inf")  # closest approach to the trailing floor
@@ -137,6 +139,7 @@ class Account:
             s.open_positions[p.id] = p
             s.floating[p.id] = 0.0
             s.trading_days.add(s.day_key)
+            s.day_trades[s.day_key] = s.day_trades.get(s.day_key, 0) + 1
         elif ev.kind == "close":
             p = ev.position
             assert p is not None
@@ -144,6 +147,7 @@ class Account:
             s.floating.pop(p.id, None)
             s.balance += ev.pnl
             s.n_trades += 1
+            s.results.append(ev.pnl)
             s.daily_pnl[s.day_key] = s.daily_pnl.get(s.day_key, 0.0) + ev.pnl
             s.trading_days.add(s.day_key)
         s.equity = s.balance + sum(s.floating.values())

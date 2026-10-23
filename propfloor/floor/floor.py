@@ -11,6 +11,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
+import numpy as np
 import pandas as pd
 
 from propfloor.account import Account
@@ -109,14 +110,20 @@ class TradingFloor:
         return out
 
     # ---------------------------------------------------------------- simulation
-    def run(self, trades_by_strategy: dict[str, pd.DataFrame], start=None, end=None) -> None:
-        """Replay strategy trades (from live/paper signals) through every account, chronologically."""
+    def run(self, trades_by_strategy: dict[str, pd.DataFrame], start=None, end=None, rotate_top: int = 0,
+            rotate_lookback_days: int = 90) -> None:
+        """Replay strategy trades (from live/paper signals) through every account, chronologically.
+        rotate_top > 0 enables P7: each month an account only trades the `rotate_top` strategies of its
+        basket with the best trailing record (t-stat of R over the previous `rotate_lookback_days`)."""
         for fa in self.accounts.values():
             if fa.status != "active":
                 continue
             evs = []
+            own = {sid: trades_by_strategy.get(sid) for sid in fa.strategies}
+            if rotate_top > 0:
+                own = rotate_monthly(own, rotate_top, rotate_lookback_days)
             for sid in fa.strategies:
-                tr = trades_by_strategy.get(sid)
+                tr = own.get(sid)
                 if tr is None or tr.empty:
                     continue
                 if start is not None:
@@ -201,3 +208,26 @@ class TradingFloor:
                          "trailing_buffer": b["trailing"], "daily_buffer": b["daily"], "payouts": fa.payouts,
                          "strategies": len(fa.strategies)})
         return pd.DataFrame(rows)
+
+
+def rotate_monthly(trades: dict[str, pd.DataFrame | None], top: int, lookback_days: int = 90) -> dict[str, pd.DataFrame]:
+    """P7: keep, for each calendar month, only trades of the `top` strategies whose trades closed in the
+    previous `lookback_days` (strictly before the month starts) have the best t-stat of R."""
+    trades = {k: v for k, v in trades.items() if v is not None and not v.empty}
+    if not trades:
+        return {}
+    first = min(v.entry_time.min() for v in trades.values())
+    last = max(v.entry_time.max() for v in trades.values())
+    months = pd.date_range(first.normalize().replace(day=1), last + pd.offsets.MonthBegin(1), freq="MS")
+    keep: dict[str, list[pd.DataFrame]] = {k: [] for k in trades}
+    for m0, m1 in zip(months[:-1], months[1:]):
+        lb = m0 - pd.Timedelta(days=lookback_days)
+        scores = {}
+        for sid, tr in trades.items():
+            past = tr[(tr.exit_time >= lb) & (tr.exit_time < m0)]["pnl_r"]
+            scores[sid] = past.mean() / (past.std() + 1e-9) * np.sqrt(len(past)) if len(past) >= 3 else -np.inf
+        chosen = [s for s, v in sorted(scores.items(), key=lambda kv: -kv[1])[:top] if np.isfinite(v)]
+        for sid in chosen:
+            tr = trades[sid]
+            keep[sid].append(tr[(tr.entry_time >= m0) & (tr.entry_time < m1)])
+    return {k: pd.concat(v) if v else trades[k].iloc[0:0] for k, v in keep.items()}

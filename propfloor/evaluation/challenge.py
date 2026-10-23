@@ -68,6 +68,15 @@ class TradeArrays:
         self.side = tr["side"].to_numpy(int) if self.n else np.zeros(0, int)
         self.symbol = tr["symbol"].iloc[0] if self.n else "EURUSD"
 
+    def equity_curve_mask(self, n: int) -> np.ndarray:
+        """P3: trade i is taken only if the strategy's cumulative R before it is >= its n-trade moving average."""
+        cache = self.__dict__.setdefault("_ec", {})
+        if n not in cache:
+            eq = np.concatenate([[0.0], np.cumsum(self.pnl)])[:-1]
+            ma = pd.Series(eq).rolling(n, min_periods=n).mean().to_numpy()
+            cache[n] = np.where(np.isnan(ma), True, eq >= ma)
+        return cache[n]
+
     def resampled(self, rng: np.random.Generator, n_out: int, block: int = 5) -> "TradeArrays":
         """Block bootstrap of trades, re-timed from a start using sampled gaps between entries."""
         if self.n < 2:
@@ -102,12 +111,23 @@ def _ts(v: int) -> pd.Timestamp:
 
 class ChallengeSimulator:
     def __init__(self, program: ProgramConfig, risk: RiskManager | None = None, risk_per_trade: float | None = None,
-                 time_rules: bool = True, funded_days: int = 120) -> None:
+                 time_rules: bool = True, funded_days: int = 120, overlay: dict | None = None) -> None:
         self.program = program
         self.risk = risk or RiskManager(costs=program.costs)
-        if risk_per_trade is not None:
-            prof = self.risk.profile.model_copy(update={"risk_per_trade": risk_per_trade})
-            fprof = self.risk.funded_profile.model_copy(update={"risk_per_trade": risk_per_trade * 0.5})
+        overlay = dict(overlay or {})
+        self.equity_curve_n = int(overlay.pop("equity_curve_n", 0) or 0)  # P3, applied per trade below
+        fields = set(RiskProfile.model_fields)
+        ov = {k: v for k, v in overlay.items() if k in fields}
+        if risk_per_trade is not None or ov:
+            upd = dict(ov)
+            if risk_per_trade is not None:
+                upd["risk_per_trade"] = risk_per_trade
+            prof = self.risk.profile.model_copy(update=upd)
+            # funded: same tactics, half the risk, never looser than the conservative funded profile
+            fupd = {**ov, "risk_per_trade": upd.get("risk_per_trade", prof.risk_per_trade) * 0.5, "fast_pass_mult": 1.0,
+                    "soft_daily_stop": min(ov.get("soft_daily_stop", 1.0), self.risk.funded_profile.soft_daily_stop),
+                    "max_buffer_use": self.risk.funded_profile.max_buffer_use}
+            fprof = self.risk.funded_profile.model_copy(update=fupd)
             self.risk = RiskManager(prof, fprof, self.risk.costs, self.risk.pip_value)
         self.funded_days = funded_days
         self._rules = {}
@@ -140,6 +160,9 @@ class ChallengeSimulator:
             acc.tick(et)
             if acc.status != "active":
                 break
+            if self.equity_curve_n and not ta.equity_curve_mask(self.equity_curve_n)[i]:
+                i += 1  # P3: strategy's own equity curve below its MA -> sit this trade out
+                continue
             dec = self.risk.size(acc, float(ta.stop_pips[i]))
             if dec.ok:
                 money_per_r = dec.lots * self.risk.pip_value * float(ta.stop_pips[i])

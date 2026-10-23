@@ -10,8 +10,8 @@ import numpy as np
 import pandas as pd
 
 from propfloor.strategies.backtest import run_backtest
-from propfloor.strategies.blocks import (ENTRIES, EXIT_SPACE, FILTERS, SIZING_SPACE, TIMEFRAMES, Ctx, sample_param,
-                                         sample_params)
+from propfloor.strategies.blocks import (ENTRIES, EXIT_SPACE, FILTERS, OVERLAY_SPACE, SIZING_SPACE, TIMEFRAMES, Ctx,
+                                         sample_param, sample_params)
 
 
 @dataclass
@@ -30,6 +30,7 @@ class StrategyGenome:
     direction: str = "both"  # both | long | short
     symbol: str = "EURUSD"
     origin: str = "random"
+    overlay: dict = field(default_factory=dict)  # account-level tactics (J / P3 / P4 / Q), see OVERLAY_SPACE
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -39,18 +40,24 @@ class StrategyGenome:
         d = copy.deepcopy(d)
         d["entry"] = Component(**d["entry"])
         d["filters"] = [Component(**f) for f in d["filters"]]
+        d.setdefault("overlay", {})
         return cls(**d)
 
     def key(self) -> str:
         d = self.to_dict()
         d.pop("origin", None)
+        if not d.get("overlay"):
+            d.pop("overlay", None)  # keeps ids of pre-overlay genomes stable
         return hashlib.sha1(json.dumps(d, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
     def describe(self) -> str:
         f = " & ".join(f"{c.name}" for c in self.filters if c.name != "none") or "no filter"
         e = self.exit
         return (f"{self.symbol} {self.tf} {self.entry.name}({_fmt(self.entry.params)}) | {f} | SL {e['sl_type']} {e['sl_atr']:.2f}ATR "
-                f"TP {e['tp_r']}R ts{e['time_stop']} trail{e['trail_atr']} | {self.direction}")
+                f"TP {e['tp_r']}R ts{e['time_stop']} trail{e['trail_atr']}"
+                + (f" part{e['partial_r']}" if e.get("partial_r") else "")
+                + (f" x:{e['exit_mode']}" if e.get("exit_mode", "none") != "none" else "")
+                + f" | {self.direction}" + (f" | ov:{_ovl(self.overlay)}" if self.overlay else ""))
 
     # ------------------------------------------------------------- signals
     def signals(self, ctx: Ctx) -> tuple[np.ndarray, np.ndarray]:
@@ -69,7 +76,41 @@ class StrategyGenome:
 
     def backtest(self, ctx: Ctx, **costs) -> pd.DataFrame:
         lo, sh = self.signals(ctx)
-        return run_backtest(ctx, lo, sh, self.exit, **costs)
+        ex = self.exit
+        if int(ex.get("time_stop", 0)) == -1:
+            ex = {**ex, "time_stop": signal_decay_hold(ctx, lo, sh)}
+        return run_backtest(ctx, lo, sh, ex, **costs)
+
+
+def signal_decay_hold(ctx: Ctx, lo: np.ndarray, sh: np.ndarray, max_h: int = 48) -> int:
+    """P5: holding period (bars) where the signal's in-sample edge peaks (t-stat of signed forward
+    return, entry at next open). Uses only signals and prices inside the training period."""
+    tm = ctx.train_mask
+    sig = np.where(lo, 1.0, np.where(sh, -1.0, 0.0))
+    idx = np.where((sig != 0) & tm)[0]
+    idx = idx[idx + max_h + 1 < ctx.n]
+    idx = idx[tm[np.minimum(idx + max_h + 1, ctx.n - 1)]]
+    if len(idx) < 20:
+        return 24
+    best_h, best_t = 24, -np.inf
+    a = ctx.atr()[idx]
+    for hh in (2, 3, 4, 6, 8, 12, 16, 24, 32, 48):
+        if hh > max_h:
+            break
+        r = sig[idx] * (ctx.c[idx + hh] - ctx.o[idx + 1]) / a
+        r = r[np.isfinite(r)]
+        if len(r) < 20 or r.std() == 0:
+            continue
+        t = r.mean() / r.std() * np.sqrt(len(r))
+        if t > best_t:
+            best_h, best_t = hh, t
+    return best_h
+
+
+def _ovl(o: dict) -> str:
+    keys = {"daily_profit_cap": "cap", "max_trades_per_day": "mtd", "loss_streak_n": "ls", "fast_pass_mult": "fp",
+            "buffer_risk_frac": "buf", "target_banking": "bank", "anti_martingale_step": "am", "equity_curve_n": "ec"}
+    return ",".join(f"{v}={o[k]}" for k, v in keys.items() if o.get(k) not in (None, 0, 0.0, False, 1.0))
 
 
 def _fmt(p: dict) -> str:
@@ -90,6 +131,7 @@ def random_genome(rng: np.random.Generator, timeframes=TIMEFRAMES, max_filters: 
         sizing=sample_params(SIZING_SPACE, rng),
         direction=str(rng.choice(["both", "both", "long", "short"])),
         symbol=str(symbols[int(rng.integers(len(symbols)))]),
+        overlay=sample_params(OVERLAY_SPACE, rng),
     )
 
 
@@ -133,8 +175,10 @@ def mutate(g: StrategyGenome, rng: np.random.Generator, timeframes=TIMEFRAMES, s
         g.symbol = str(symbols[int(rng.integers(len(symbols)))])
     elif r < 0.9:
         g.direction = str(rng.choice(["both", "long", "short"]))
-    elif r < 0.95:
+    elif r < 0.93:
         g.sizing = sample_params(SIZING_SPACE, rng)
+    elif r < 0.97:
+        g.overlay = _mutate_params(g.overlay or sample_params(OVERLAY_SPACE, rng), OVERLAY_SPACE, rng)
     else:
         en = list(ENTRIES)[int(rng.integers(len(ENTRIES)))]
         g.entry = Component(en, sample_params(ENTRIES[en].space, rng))
@@ -146,4 +190,5 @@ def crossover(a: StrategyGenome, b: StrategyGenome, rng: np.random.Generator) ->
     return StrategyGenome(tf=pick(a.tf, b.tf), entry=pick(a.entry, b.entry), filters=pick(a.filters, b.filters),
                           exit=pick(a.exit, b.exit), sizing=pick(a.sizing, b.sizing),
                           direction=pick(a.direction, b.direction), symbol=pick(a.symbol, b.symbol),
+                          overlay=pick(a.overlay, b.overlay),
                           origin="crossover")

@@ -54,6 +54,9 @@ class Universe:
             for tf in timeframes:
                 bars = m1 if tf == "M1" else resample(m1, tf)
                 self.ctx[(sym, tf)] = Ctx(bars, sym, tf)
+                self.ctx[(sym, tf)].train_end = self.oos_start[sym]
+        for (sym, tf), c in self.ctx.items():  # intermarket blocks see the other symbols on the same timeframe
+            c.peers = {s: self.ctx[(s, tf)] for s in data if s != sym}
         self.symbols = list(data)
         self.timeframes = list(timeframes)
 
@@ -78,7 +81,7 @@ class Evaluator:
         return tr[tr.exit_time < cut], tr[tr.entry_time >= cut]
 
     def sim(self, g: StrategyGenome) -> ChallengeSimulator:
-        return ChallengeSimulator(self.program, risk_per_trade=g.sizing.get("risk_per_trade", 0.005))
+        return ChallengeSimulator(self.program, risk_per_trade=g.sizing.get("risk_per_trade", 0.005), overlay=g.overlay)
 
     # ---------------------------------------------------------------- quick (GA fitness, IS only)
     def quick(self, g: StrategyGenome) -> tuple[float, dict]:

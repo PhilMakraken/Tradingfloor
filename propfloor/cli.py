@@ -100,7 +100,7 @@ def cmd_floor(args):
     ev = _evaluator(args, program)
     ids = {s for a in fl.accounts.values() for s in a.strategies}
     trades = {sid: ev.trades(g) for sid, g in fl.genomes(list(ids)).items()}
-    fl.run(trades, start=args.since)
+    fl.run(trades, start=args.since, rotate_top=args.rotate_top)
     print(fl.summary().to_string(index=False))
 
 
@@ -142,7 +142,7 @@ def main(argv=None):
 
     def eval_opts(x):
         x.add_argument("--symbols", default=None)
-        x.add_argument("--timeframes", default="M15,M30,H1,H4")
+        x.add_argument("--timeframes", default="M15,M30,H1,H4,D1")
         x.add_argument("--start", default=None)
         x.add_argument("--oos-frac", type=float, default=0.25)
         x.add_argument("--quick-sims", type=int, default=30)
@@ -166,6 +166,7 @@ def main(argv=None):
     x.add_argument("--accounts", type=int, default=10)
     x.add_argument("--per-account", type=int, default=2)
     x.add_argument("--since", default=None, help="paper-trade from this date")
+    x.add_argument("--rotate-top", type=int, default=0, help="P7: monthly rotation to the top-N strategies per account")
     x.set_defaults(fn=cmd_floor)
 
     x = sub.add_parser("status")
