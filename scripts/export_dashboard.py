@@ -48,7 +48,8 @@ def main(db_path: str = "propfloor.sqlite", out: str = "dashboard_export") -> No
 
     # leaderboard: best per entry block so near-copies don't fill it
     seen, board = set(), []
-    for r in q("SELECT * FROM strategies ORDER BY fitness DESC LIMIT 2000"):
+    for r in q("SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY json_extract(genome,'$.entry.name') "
+               "ORDER BY fitness DESC) rn FROM strategies) WHERE rn = 1 ORDER BY fitness DESC LIMIT 40"):
         g = json.loads(r["genome"])["entry"]["name"]
         if g in seen:
             continue
