@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "propfloor"
+version = "0.1.0"
+description = "Autonomous prop-firm strategy research lab and virtual trading floor"
+requires-python = ">=3.11"
+dependencies = [
+  "pandas>=2.1", "numpy>=1.26", "pydantic>=2.5", "pyyaml>=6", "pyarrow>=14",
+  "numba>=0.59", "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dashboard = ["streamlit>=1.30"]
+llm = ["anthropic>=0.40"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+propfloor = "propfloor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["propfloor*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

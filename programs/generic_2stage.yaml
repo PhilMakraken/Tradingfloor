@@ -1,0 +1,56 @@
+# Generic 2-stage program. PLACEHOLDER numbers - real firm configs go in sibling files.
+name: generic_2stage
+currency: USD
+starting_balance: 100000
+
+stages:
+  - name: stage1
+    profit_target: 0.08
+    rules:
+      - name: min_trading_days
+        params: {days: 4}
+  - name: stage2
+    profit_target: 0.08
+    rules:
+      - name: min_trading_days
+        params: {days: 4}
+
+funded:
+  profit_split: 0.8
+  payout_period_days: 30
+  rules:
+    - name: consistency_rule
+      params: {max_day_share: 0.5}   # no single day > 50% of period profit (payout gate)
+
+drawdown:
+  max_dd: 0.05
+  trailing: true
+  trail_basis: equity       # equity | balance
+  lock_at_start: true       # floor stops trailing at starting balance
+
+daily_drawdown:
+  limit: 0.03
+  basis: balance            # balance | equity | max_balance_equity
+  reset_time: "17:00"
+  timezone: America/New_York
+  limit_of: starting_balance
+
+rules:
+  - name: max_lot
+    params: {max_lots: 50}
+  - name: max_open_trades
+    params: {max: 10}
+  - name: news_blackout
+    params: {minutes_before: 2, minutes_after: 2, calendar: data/calendar/high_impact.csv}
+  - name: no_weekend_holding
+    params: {friday_cutoff: "16:50", timezone: America/New_York}
+  - name: max_time_in_trade
+    params: {max_hours: 120}
+
+plugins: []   # e.g. ["my_firm_rules"] - modules whose @register_rule classes become available
+
+costs:
+  spread_pips: 1.0
+  slippage_pips: 0.3
+  commission_per_lot: 7.0
+  gap_allowance_pips: 5.0
