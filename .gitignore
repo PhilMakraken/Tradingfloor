@@ -13,3 +13,4 @@ data/downloads/
 *.log
 *.sqlite-wal
 *.sqlite-shm
+dashboard_export/
