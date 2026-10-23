@@ -116,3 +116,14 @@ def test_genome_roundtrip_mutation_crossover(ctx):
     c = crossover(a, b, rng)
     assert c.tf in (a.tf, b.tf)
     assert isinstance(a.describe(), str)
+
+
+@pytest.mark.parametrize("tf", ["M30", "H1", "H4", "D1"])
+def test_weekend_flat_on_every_timeframe(tf):
+    from propfloor.rules.builtin import _next_friday_cutoff
+
+    c = Ctx(resample(make_bars("2020-01-01", "2020-04-01", seed=8, freq="15min"), tf), "EURUSD", tf)
+    tr = run_backtest(c, np.ones(c.n, bool), np.zeros(c.n, bool), {"sl_atr": 50, "tp_r": 0})
+    assert len(tr) > 3
+    for e, x in zip(tr.entry_time, tr.exit_time):
+        assert x <= _next_friday_cutoff(e, "America/New_York", "16:50"), (tf, e, x)

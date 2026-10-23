@@ -205,8 +205,12 @@ def _bar_len(ctx) -> pd.Timedelta:
 
 
 def _force_flat(ctx) -> np.ndarray:
-    """Be flat before the weekend: Friday from 15:00 New York, or any bar followed by a >24h gap."""
-    ny = ctx.time.tz_convert("America/New_York")
-    late_fri = (ny.weekday == 4) & (ny.hour >= 15)
+    """Be flat before the weekend. Exits happen at a bar's close, so a position is closed at the end of bar i
+    when holding through bar i+1 would end past Friday 15:00 New York (or across a >24h gap). Using bar
+    *ends* matters on H4/D1, where a bar that starts before the cutoff can end well after it."""
+    blen = _bar_len(ctx) + pd.Timedelta(seconds=1)
+    ends = (ctx.time + blen).tz_convert("America/New_York")
+    late_end = np.asarray(((ends.weekday == 4) & (ends.hour * 60 + ends.minute > 15 * 60)) | (ends.weekday >= 5))
     nxt_gap = np.r_[np.diff(ctx.t_ns) > 24 * 3_600_000_000_000, False]
-    return np.asarray(late_fri | (ny.weekday >= 5) | nxt_gap, dtype=np.bool_)
+    next_late = np.r_[late_end[1:], True]
+    return np.asarray(late_end | next_late | nxt_gap, dtype=np.bool_)
