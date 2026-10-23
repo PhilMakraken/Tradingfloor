@@ -44,14 +44,17 @@ class Factory:
     def _elites(self) -> list[StrategyGenome]:
         """Best genomes, at most `per_family` per entry block (and one per entry+symbol+tf niche) so the
         search can't collapse onto near-copies of a single idea."""
-        out, fam, niche = [], {}, set()
-        for r in self.db.top(max(self.elite * 30, 300)):
+        # best row per (entry block, symbol, timeframe) niche over the whole history, best niches first
+        rows = self.db.query(
+            "SELECT genome FROM (SELECT genome, fitness, ROW_NUMBER() OVER (PARTITION BY "
+            "json_extract(genome,'$.entry.name'), symbol, tf ORDER BY fitness DESC) rn FROM strategies "
+            "WHERE fitness > -5) WHERE rn = 1 ORDER BY fitness DESC LIMIT ?", (self.elite * 20,))
+        out, fam = [], {}
+        for r in rows:
             g = StrategyGenome.from_dict(json.loads(r["genome"]))
-            nk = (g.entry.name, g.symbol, g.tf)
-            if fam.get(g.entry.name, 0) >= self.per_family or nk in niche:
+            if fam.get(g.entry.name, 0) >= self.per_family:
                 continue
             fam[g.entry.name] = fam.get(g.entry.name, 0) + 1
-            niche.add(nk)
             out.append(g)
             if len(out) >= self.elite:
                 break
