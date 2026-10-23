@@ -31,6 +31,7 @@ class Gates:
     min_p_pass_oos: float = 0.20
     max_degradation: float = 0.5  # OOS p_pass must be >= this share of IS p_pass
     min_cross_symbol_positive: float = 0.5  # share of other symbols with positive expectancy
+    allow_synthetic: bool = False  # DEV ONLY: lets synthetic data validate (pipeline smoke tests)
 
 
 @dataclass
@@ -92,8 +93,10 @@ class Evaluator:
         res = self.sim(g).evaluate(is_tr, n_windows=self.quick_sims, n_mc=self.quick_sims, seed=self.seed)
         s = summarize(res)
         info["challenge_is"] = {k: s[k] for k in ("p_pass_all", "p_pass_stage1", "p_funded_survive", "expected_payout")}
-        # shrink by sample size so tiny samples can't top the leaderboard
-        fit = s["p_pass_all"] * (1 - 1 / np.sqrt(ts["n"])) + 0.1 * s["p_funded_survive"]
+        # primary: P(pass both stages); secondary terms give the GA a gradient before anything passes.
+        # Shrunk by sample size so tiny samples can't top the leaderboard.
+        fit = (s["p_pass_all"] + 0.25 * s["p_pass_stage1"] + 0.1 * s["p_funded_survive"]
+               + 0.1 * min(ts["expectancy_r"], 1.0)) * (1 - 1 / np.sqrt(ts["n"]))
         return float(fit), info
 
     # ---------------------------------------------------------------- full validation
@@ -104,7 +107,7 @@ class Evaluator:
         is_tr, oos_tr = self.split(tr, g.symbol)
         r_is, r_oos = is_tr["pnl_r"].to_numpy(), oos_tr["pnl_r"].to_numpy()
         m: dict = {"is": trade_summary(r_is), "oos": trade_summary(r_oos)}
-        if self.u.synthetic.get(g.symbol):
+        if self.u.synthetic.get(g.symbol) and not G.allow_synthetic:
             reasons.append("synthetic data cannot validate")
         if m["is"]["n"] < G.min_trades_is:
             reasons.append(f"IS trades {m['is']['n']} < {G.min_trades_is}")
