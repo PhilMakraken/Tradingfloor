@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 
 class Factory:
     def __init__(self, evaluator: Evaluator, db: ResultsDB, seed: int | None = None, pop_size: int = 40,
-                 elite: int = 10, random_frac: float = 0.35, candidate_threshold: float = 0.15,
+                 elite: int = 12, random_frac: float = 0.5, candidate_threshold: float = 0.15, per_family: int = 2,
                  llm=None, llm_every: int = 10, llm_n: int = 8) -> None:
         self.ev = evaluator
         self.db = db
@@ -31,6 +31,7 @@ class Factory:
         self.pop_size = pop_size
         self.elite = elite
         self.random_frac = random_frac
+        self.per_family = per_family
         self.threshold = candidate_threshold
         self.llm = llm
         self.llm_every = llm_every
@@ -41,7 +42,20 @@ class Factory:
 
     # ------------------------------------------------------------------ population
     def _elites(self) -> list[StrategyGenome]:
-        return [StrategyGenome.from_dict(json.loads(r["genome"])) for r in self.db.top(self.elite)]
+        """Best genomes, at most `per_family` per entry block (and one per entry+symbol+tf niche) so the
+        search can't collapse onto near-copies of a single idea."""
+        out, fam, niche = [], {}, set()
+        for r in self.db.top(max(self.elite * 30, 300)):
+            g = StrategyGenome.from_dict(json.loads(r["genome"]))
+            nk = (g.entry.name, g.symbol, g.tf)
+            if fam.get(g.entry.name, 0) >= self.per_family or nk in niche:
+                continue
+            fam[g.entry.name] = fam.get(g.entry.name, 0) + 1
+            niche.add(nk)
+            out.append(g)
+            if len(out) >= self.elite:
+                break
+        return out
 
     def _tournament(self, elites):
         k = min(3, len(elites))

@@ -8,6 +8,7 @@ from propfloor.db import ResultsDB
 from propfloor.evaluation.walkforward import Evaluator, Gates, Universe
 from propfloor.factory.engine import Factory
 from propfloor.factory.llm import coerce, parse_genomes
+from propfloor.strategies.genome import StrategyGenome
 
 
 def make_factory(tmp_path, **kw):
@@ -64,3 +65,14 @@ def test_factory_uses_llm(tmp_path):
     f.step()
     assert llm.calls == 1
     assert any(json.loads(r["genome"])["origin"] == "llm" for r in f.db.top(100))
+
+
+def test_elites_are_diverse(tmp_path):
+    f = make_factory(tmp_path)
+    g = f.population()[0]
+    for i in range(6):  # six near-copies of one entry block with top fitness
+        c = StrategyGenome.from_dict(g.to_dict())
+        c.exit["sl_atr"] = 1.0 + i / 10
+        f.db.save_candidate(c.key(), c.to_dict(), c.describe(), 0, 1.0 - i / 100, {})
+    el = f._elites()
+    assert sum(e.entry.name == g.entry.name for e in el) <= 2
