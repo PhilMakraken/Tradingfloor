@@ -84,9 +84,12 @@ class ResultsDB:
         self.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (key, json.dumps(value)))
 
     def add_trials(self, n: int = 1) -> int:
-        t = int(self.get_meta("n_trials", 0)) + n
-        self.set_meta("n_trials", t)
-        return t
+        """Atomic increment (several processes may share the database)."""
+        with self._lock:
+            self.conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('n_trials', '0')")
+            self.conn.execute("UPDATE meta SET value = CAST(value AS INTEGER) + ? WHERE key = 'n_trials'", (n,))
+            self.conn.commit()
+            return int(self.conn.execute("SELECT value FROM meta WHERE key='n_trials'").fetchone()[0])
 
     @property
     def n_trials(self) -> int:

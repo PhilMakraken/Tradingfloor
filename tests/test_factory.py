@@ -76,3 +76,17 @@ def test_elites_are_diverse(tmp_path):
         f.db.save_candidate(c.key(), c.to_dict(), c.describe(), 0, 1.0 - i / 100, {})
     el = f._elites()
     assert sum(e.entry.name == g.entry.name for e in el) <= 2
+
+
+def test_queued_ideas_are_consumed(tmp_path):
+    ideas = tmp_path / "ideas"
+    ideas.mkdir()
+    (ideas / "agent1.json").write_text(json.dumps([
+        {"symbol": "EURUSD", "tf": "H1", "entry": {"name": "donchian_breakout", "params": {"n": 30}}, "filters": [],
+         "exit": {"sl_atr": 2.0, "tp_r": 2.0}, "sizing": {"risk_per_trade": 0.005}},
+        {"entry": {"name": "not_a_block"}}]))
+    f = make_factory(tmp_path, idea_dir=str(ideas))
+    f.step()
+    assert not list(ideas.glob("*.json")) and (ideas / "done" / "agent1.json").exists()
+    assert any(r["origin"] == "claude:agent1" for r in f.db.query("SELECT origin FROM strategies"))
+    assert f.db.n_trials == len(f.db.query("SELECT id FROM strategies"))

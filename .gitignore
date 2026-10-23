@@ -14,3 +14,6 @@ data/downloads/
 *.sqlite-wal
 *.sqlite-shm
 dashboard_export/
+
+research/
+data/ideas/

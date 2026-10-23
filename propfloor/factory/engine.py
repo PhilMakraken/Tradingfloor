@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -24,7 +25,8 @@ log = logging.getLogger(__name__)
 class Factory:
     def __init__(self, evaluator: Evaluator, db: ResultsDB, seed: int | None = None, pop_size: int = 40,
                  elite: int = 12, random_frac: float = 0.5, candidate_threshold: float = 0.15, per_family: int = 2,
-                 llm=None, llm_every: int = 10, llm_n: int = 8) -> None:
+                 llm=None, llm_every: int = 10, llm_n: int = 8,
+                 idea_dir: str | None = "data/ideas") -> None:
         self.ev = evaluator
         self.db = db
         self.rng = np.random.default_rng(seed)
@@ -37,6 +39,7 @@ class Factory:
         self.llm_every = llm_every
         self.llm_n = llm_n
         self.generation = int(db.get_meta("generation", 0))
+        self.idea_dir: Path | None = Path(idea_dir) if idea_dir else None
         self.symbols = evaluator.u.symbols
         self.tfs = evaluator.u.timeframes
 
@@ -80,7 +83,37 @@ class Factory:
                 pop += self.llm.propose(self.llm_n, self._leaderboard(), self._failures(), self.symbols, self.tfs)
             except Exception as e:  # noqa: BLE001
                 log.warning("LLM proposal failed: %s", e)
+        pop += self._queued_ideas()
         return pop
+
+    def _queued_ideas(self, max_files: int = 20) -> list[StrategyGenome]:
+        """Strategy ideas dropped as JSON arrays into `idea_dir` (e.g. by Claude research agents).
+        Each file is consumed once (moved to idea_dir/done/); malformed items are skipped."""
+        from propfloor.factory.llm import coerce
+
+        if self.idea_dir is None or not self.idea_dir.exists():
+            return []
+        out: list[StrategyGenome] = []
+        done = self.idea_dir / "done"
+        done.mkdir(exist_ok=True)
+        for f in sorted(self.idea_dir.glob("*.json"))[:max_files]:
+            try:
+                items = json.loads(f.read_text())
+                tag = f.stem
+                for it in items if isinstance(items, list) else []:
+                    try:
+                        g = coerce(it)
+                    except Exception:  # noqa: BLE001
+                        g = None
+                    if g is not None:
+                        g.origin = f"claude:{tag}"[:60]
+                        out.append(g)
+            except Exception as e:  # noqa: BLE001
+                log.warning("bad idea file %s: %s", f.name, e)
+            f.rename(done / f.name)
+        if out:
+            log.info("loaded %d queued strategy ideas", len(out))
+        return out
 
     def _leaderboard(self) -> list[dict]:
         return [{"desc": r["description"], "fitness": round(r["fitness"], 3), "status": r["status"]} for r in self.db.top(15)]
