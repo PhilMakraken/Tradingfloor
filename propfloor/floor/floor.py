@@ -190,7 +190,7 @@ class TradingFloor:
             (fa.id, self.program.name, fa.lifecycle_stage, fa.status, json.dumps(fa.strategies), s.start_balance,
              s.balance, s.equity, a.floor, a.daily_floor, fa.payouts,
              json.dumps(a.violation.__dict__, default=str) if a.violation else None, fa.id, now(), now(),
-             json.dumps({"history": fa.history[-50:], "trading_days": len(s.trading_days), "n_trades": s.n_trades})))
+             json.dumps({"history": fa.history[-50:], "trading_days": len(s.trading_days), "n_trades": s.n_trades}, default=str)))
 
     def summary(self) -> pd.DataFrame:
         rows = []
