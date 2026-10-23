@@ -109,3 +109,17 @@ def test_histdata_parsers():
     assert histdata.parse_token('<input type="hidden" id="tk" value="abc123" />') == "abc123"
     out = histdata.parse_ascii("20180102 170000;1.2;1.3;1.1;1.25;0\n")
     assert out.index[0] == pd.Timestamp("2018-01-02 22:00", tz="UTC")
+
+
+def test_github_mirror_parse_scale_and_timezone():
+    from propfloor.data import github_mirror
+
+    text = "Date,open,high,low,close,tick_volume\n2020-01-06 00:00:00,112000.0,112010.0,111990.0,112005.0,10\n" \
+           "2020-07-06 00:00:00,112000.0,112010.0,111990.0,112005.0,10\n"
+    df = github_mirror.parse(text, "EURUSD")
+    assert df["close"].iloc[0] == pytest.approx(1.12005)
+    # server midnight = 17:00 New York (EST in winter, EDT in summer)
+    assert df.index[0] == pd.Timestamp("2020-01-05 22:00", tz="UTC")
+    assert df.index[1] == pd.Timestamp("2020-07-05 21:00", tz="UTC")
+    jpy = github_mirror.parse(text.replace("112", "108"), "USDJPY")
+    assert 50 < jpy["close"].iloc[0] < 250

@@ -30,10 +30,10 @@ def cmd_ingest(args):
 
 
 def cmd_download(args):
-    from propfloor.data import dukascopy, histdata
+    from propfloor.data import dukascopy, github_mirror, histdata
 
     st = _store(args)
-    mod = {"dukascopy": dukascopy, "histdata": histdata}[args.source]
+    mod = {"dukascopy": dukascopy, "histdata": histdata, "github": github_mirror}[args.source]
     for sym in args.symbols.split(","):
         try:
             df = mod.download(sym, args.start, args.end)
@@ -128,7 +128,7 @@ def main(argv=None):
     x.add_argument("--raw-dir", default="data/raw")
     x.set_defaults(fn=cmd_ingest)
     x = d.add_parser("download")
-    x.add_argument("--source", choices=["dukascopy", "histdata"], default="dukascopy")
+    x.add_argument("--source", choices=["dukascopy", "histdata", "github"], default="dukascopy")
     x.add_argument("--symbols", default="EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,USDCHF,NZDUSD,EURJPY,GBPJPY,EURGBP")
     x.add_argument("--start", default="2015-01-01")
     x.add_argument("--end", default=None)

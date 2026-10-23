@@ -9,6 +9,7 @@ Paper trading only.
 - `pytest -q`                                  — test suite
 - `python -m propfloor data ingest`            — load data/raw/*.csv (+ downloads) into data/parquet/
 - `python -m propfloor data download --source dukascopy --symbols EURUSD,GBPUSD --start 2018-01-01`
+- `python -m propfloor data download --source github --start 2012-01-01`  — 12 FX/gold M15 histories 2012-2022 (GitHub mirror; works where Dukascopy/HistData are firewalled)
 - `python -m propfloor data synth --symbols EURUSD`  — synthetic data (smoke tests ONLY)
 - `python -m propfloor factory run [--hours N] [--llm]`  — strategy factory (runs forever by default)
 - `python -m propfloor floor run`              — paper-trading floor step
@@ -22,7 +23,7 @@ Paper trading only.
 | `rules/builtin.py` | max_lot, max_open_trades, news_blackout, no_weekend_holding, max_time_in_trade, min_trading_days (completion gate), consistency_rule (completion gate) |
 | `account.py` | `Account`: balance/equity, trailing max-DD floor (peak equity or peak closed balance, optional lock at start balance), daily DD (basis balance/equity, reset hour + tz), event processing, permanent closure on breach |
 | `risk.py` | `RiskManager`: worst-case loss = stop + spread + slippage + gap allowance; must fit remaining daily AND trailing buffer; sizing from buffer; soft daily stop; de-risk near target; conservative funded profile |
-| `data/` | `loader.py` CSV auto-detect (MT4/MT5/HistData/Dukascopy/generic), `clean.py` (dedupe, gaps, tz->UTC, sanity), `store.py` parquet, `dukascopy.py`, `histdata.py`, `synthetic.py` |
+| `data/` | `loader.py` CSV auto-detect (MT4/MT5/HistData/Dukascopy/generic), `clean.py` (dedupe, gaps, tz->UTC, sanity), `store.py` parquet, `dukascopy.py`, `histdata.py`, `github_mirror.py` (M15 MT exports, server time = NY+7h), `synthetic.py` |
 | `strategies/indicators.py` | numpy/numba indicators (SMA, EMA, RSI, MACD, BB, ATR, ADX, Stoch, Donchian, swings) |
 | `strategies/blocks.py` | building-block registry: ENTRIES (patterns, breakouts, MR, trend, momentum/streak, gaps, S/R), FILTERS (session, DOW, vol regime, ADX, MTF trend, candle size), EXITS (ATR SL/TP, R-multiple, time stop, trailing), SIZING |
 | `strategies/genome.py` | `StrategyGenome` (entry+filters+exit+params, json-serialisable, hash id), random generation, mutation, crossover |

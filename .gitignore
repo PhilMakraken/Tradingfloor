@@ -10,3 +10,4 @@ data/downloads/
 *.sqlite
 *.sqlite-journal
 .venv/
+*.log
