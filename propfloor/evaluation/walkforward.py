@@ -143,14 +143,19 @@ class Evaluator:
             reasons.append(f"OOS P(pass) {s_oos['p_pass_all']:.2f} < {G.min_p_pass_oos}")
         if s_oos["p_pass_all"] < G.max_degradation * s_is["p_pass_all"]:
             reasons.append("OOS P(pass) degraded vs IS (overfit)")
-        # cross-symbol robustness (same rules on other pairs, IS only)
+        # cross-symbol robustness (same rules on other pairs, IS only). Symbols where the block cannot
+        # trade (e.g. an intermarket block without its peers) are not applicable rather than failures.
         others = [s for s in self.u.symbols if s != g.symbol]
         if others:
             pos = []
             for s in others:
                 o_is, _ = self.split(self.trades(g, s), s)
-                pos.append(len(o_is) >= 10 and o_is["pnl_r"].mean() > 0)
-            m["cross_symbol_positive"] = float(np.mean(pos))
-            if m["cross_symbol_positive"] < G.min_cross_symbol_positive:
+                if len(o_is) >= 10:
+                    pos.append(o_is["pnl_r"].mean() > 0)
+            m["cross_symbol_applicable"] = len(pos)
+            m["cross_symbol_positive"] = float(np.mean(pos)) if pos else None
+            if not pos:
+                m["specialised"] = True  # only tradable on its own symbol: flagged, OOS gates still apply
+            elif m["cross_symbol_positive"] < G.min_cross_symbol_positive:
                 reasons.append("does not generalise to other symbols")
         return ValidationResult(not reasons, reasons, m)
