@@ -88,3 +88,11 @@ def test_evaluator_runs_and_rejects_synthetic(program):
     is_tr, oos_tr = ev.split(ev.trades(g), "EURUSD")
     if len(is_tr) and len(oos_tr):
         assert is_tr.exit_time.max() < oos_tr.entry_time.min()
+
+
+def test_short_holdout_judged_by_monte_carlo(program):
+    sim = ChallengeSimulator(program, risk_per_trade=0.005)
+    rng = np.random.default_rng(3)
+    short = mk(rng.choice([3.0, -1.0], p=[0.4, 0.6], size=40))  # good edge, too few trades to finish 2 stages
+    res = sim.evaluate(short, 20, 20, mc_len=600)
+    assert summarize(res)["p_pass_all"] < summarize(res, mc_only=True)["p_pass_all"]

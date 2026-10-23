@@ -265,9 +265,13 @@ class ChallengeSimulator:
         return st
 
 
-def summarize(res: dict[str, ChallengeStats]) -> dict:
-    """Conservative headline: the worse of the historical-window and Monte Carlo estimates."""
+def summarize(res: dict[str, ChallengeStats], mc_only: bool = False) -> dict:
+    """Conservative headline: the worse of the historical-window and Monte Carlo estimates.
+    mc_only=True uses only the Monte Carlo estimate (for short holdouts, where historical windows run out of
+    data before a slow strategy can finish both stages - "exhausted" is not a breach)."""
     w, m = res["windows"], res["mc"]
+    if mc_only:
+        w = m
     return {
         "p_pass_all": min(w.p_pass_all, m.p_pass_all),
         "p_pass_stage1": min(next(iter(w.p_stage.values()), 0), next(iter(m.p_stage.values()), 0)),

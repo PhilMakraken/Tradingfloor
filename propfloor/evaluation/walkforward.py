@@ -93,8 +93,9 @@ class Evaluator:
         if ts["n"] < self.gates.min_trades_is or ts["expectancy_r"] <= 0:
             fit = ts["expectancy_r"] * min(ts["n"], 50) / 50 - 1.0  # negative: guides search towards edge
             return fit, info
-        res = self.sim(g).evaluate(is_tr, n_windows=self.quick_sims, n_mc=self.quick_sims, seed=self.seed)
-        s = summarize(res)
+        res = self.sim(g).evaluate(is_tr, n_windows=self.quick_sims // 3, n_mc=self.quick_sims, seed=self.seed,
+                                   mc_len=max(len(is_tr) * 2, 600))
+        s = summarize(res, mc_only=True)
         info["challenge_is"] = {k: s[k] for k in ("p_pass_all", "p_pass_stage1", "p_funded_survive", "expected_payout")}
         # primary: P(pass both stages); secondary terms give the GA a gradient before anything passes.
         # Shrunk by sample size so tiny samples can't top the leaderboard.
@@ -134,8 +135,14 @@ class Evaluator:
         if m["oos"]["expectancy_r"] <= G.min_expectancy_oos:
             reasons.append("OOS expectancy <= 0")
         sim = self.sim(g)
-        s_is = summarize(sim.evaluate(is_tr, n_windows=self.full_sims, n_mc=self.full_sims, seed=self.seed + 1))
-        s_oos = summarize(sim.evaluate(oos_tr, n_windows=self.full_sims, n_mc=self.full_sims, seed=self.seed + 2))
+        s_is = summarize(sim.evaluate(is_tr, n_windows=self.full_sims // 3, n_mc=self.full_sims, seed=self.seed + 1,
+                                      mc_len=max(len(is_tr) * 2, 600)), mc_only=True)
+        # holdout: Monte Carlo over long resampled sequences of the holdout trades ("if this behaviour continued,
+        # would it pass?"). Historical windows inside a ~2-year holdout run out of data for slow strategies.
+        oos_res = sim.evaluate(oos_tr, n_windows=self.full_sims // 3, n_mc=self.full_sims, seed=self.seed + 2,
+                               mc_len=max(len(oos_tr) * 4, 600))
+        s_oos = summarize(oos_res, mc_only=True)
+        s_oos["windows_p_pass_all"] = oos_res["windows"].p_pass_all
         m["challenge_is"], m["challenge_oos"] = s_is, s_oos
         if s_is["p_pass_all"] < G.min_p_pass_is:
             reasons.append(f"IS P(pass) {s_is['p_pass_all']:.2f} < {G.min_p_pass_is}")
