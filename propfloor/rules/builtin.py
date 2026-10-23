@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -78,7 +79,21 @@ class NewsBlackout(Rule):
             return self.violation(f"{event.kind} during news blackout", event.time)
 
 
+@lru_cache(maxsize=200_000)
+def _cutoff_cached(minute: int, tz: str, cutoff: str) -> pd.Timestamp:
+    return _next_friday_cutoff_impl(pd.Timestamp(minute * 60_000_000_000, tz="UTC"), tz, cutoff)
+
+
 def _next_friday_cutoff(t: pd.Timestamp, tz: str, cutoff: str) -> pd.Timestamp:
+    """First Friday cutoff (local time) at or after t; t itself if already in the weekend window."""
+    v = pd.Timestamp(t).as_unit("ns").value
+    m = v // 60_000_000_000
+    c = _cutoff_cached(m, tz, cutoff)
+    # cached value is computed for the start of the minute; only matters when t is inside the cutoff
+    return c if c.value > v or c.value < m * 60_000_000_000 else pd.Timestamp(t)
+
+
+def _next_friday_cutoff_impl(t: pd.Timestamp, tz: str, cutoff: str) -> pd.Timestamp:
     local = t.tz_convert(tz)
     h, m = map(int, cutoff.split(":"))
     days = (4 - local.weekday()) % 7
@@ -107,19 +122,22 @@ class NoWeekendHolding(Rule):
         if event.kind == "close" and event.position is not None:
             held.append(event.position)
         for p in held:
-            if pd.Timestamp(event.time) > _next_friday_cutoff(p.entry_time, tz, co):
+            if event.time > _next_friday_cutoff(p.entry_time, tz, co):
                 return self.violation(f"position {p.id} held over weekend", event.time)
 
 
 @register_rule("max_time_in_trade")
 class MaxTimeInTrade(Rule):
+    def __init__(self, **params):
+        super().__init__(**params)
+        self.limit = pd.Timedelta(hours=float(params.get("max_hours", 120)))
+
     def check(self, state, event):
-        limit = pd.Timedelta(hours=float(self.params.get("max_hours", 120)))
         held = list(state.open_positions.values())
         if event.kind == "close" and event.position is not None:
             held.append(event.position)
         for p in held:
-            if pd.Timestamp(event.time) - p.entry_time > limit:
+            if event.time - p.entry_time > self.limit:
                 return self.violation(f"position {p.id} exceeded max time in trade", event.time)
 
 

@@ -3,12 +3,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from functools import lru_cache
 from typing import Literal
 
 import pandas as pd
 
 from propfloor.config import ProgramConfig
 from propfloor.rules.base import Event, Position, Rule, Violation, build_rules
+
+@lru_cache(maxsize=500_000)
+def _day_key(minute: int, tz: str, reset_ns: int) -> date:
+    return (pd.Timestamp(minute * 60_000_000_000, tz="UTC").tz_convert(tz) - pd.Timedelta(reset_ns)).date()
+
 
 Status = Literal["active", "passed", "violated", "expired"]
 
@@ -98,7 +104,7 @@ class Account:
         return None if self.target is None else self.state.start_balance * (1 + self.target)
 
     def day_key(self, t: pd.Timestamp) -> date:
-        return (t.tz_convert(self._tz) - self._reset).date()
+        return _day_key(t.as_unit("ns").value // 60_000_000_000, self._tz, self._reset.value)
 
     # ------------------------------------------------------------------ events
     def _roll_day(self, t: pd.Timestamp) -> None:

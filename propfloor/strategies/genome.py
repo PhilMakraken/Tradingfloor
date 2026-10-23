@@ -28,6 +28,7 @@ class StrategyGenome:
     exit: dict
     sizing: dict
     direction: str = "both"  # both | long | short
+    symbol: str = "EURUSD"
     origin: str = "random"
 
     def to_dict(self) -> dict:
@@ -48,7 +49,7 @@ class StrategyGenome:
     def describe(self) -> str:
         f = " & ".join(f"{c.name}" for c in self.filters if c.name != "none") or "no filter"
         e = self.exit
-        return (f"{self.tf} {self.entry.name}({_fmt(self.entry.params)}) | {f} | SL {e['sl_type']} {e['sl_atr']:.2f}ATR "
+        return (f"{self.symbol} {self.tf} {self.entry.name}({_fmt(self.entry.params)}) | {f} | SL {e['sl_type']} {e['sl_atr']:.2f}ATR "
                 f"TP {e['tp_r']}R ts{e['time_stop']} trail{e['trail_atr']} | {self.direction}")
 
     # ------------------------------------------------------------- signals
@@ -75,7 +76,8 @@ def _fmt(p: dict) -> str:
     return ",".join(f"{k}={v:.3g}" if isinstance(v, float) else f"{k}={v}" for k, v in p.items())
 
 
-def random_genome(rng: np.random.Generator, timeframes=TIMEFRAMES, max_filters: int = 2) -> StrategyGenome:
+def random_genome(rng: np.random.Generator, timeframes=TIMEFRAMES, max_filters: int = 2,
+                  symbols=("EURUSD",)) -> StrategyGenome:
     en = list(ENTRIES)[int(rng.integers(len(ENTRIES)))]
     nf = int(rng.integers(0, max_filters + 1))
     fnames = [n for n in FILTERS if n != "none"]
@@ -87,6 +89,7 @@ def random_genome(rng: np.random.Generator, timeframes=TIMEFRAMES, max_filters: 
         exit=sample_params(EXIT_SPACE, rng),
         sizing=sample_params(SIZING_SPACE, rng),
         direction=str(rng.choice(["both", "both", "long", "short"])),
+        symbol=str(symbols[int(rng.integers(len(symbols)))]),
     )
 
 
@@ -106,7 +109,7 @@ def _mutate_params(params: dict, space: dict, rng, scale=0.2) -> dict:
     return p
 
 
-def mutate(g: StrategyGenome, rng: np.random.Generator, timeframes=TIMEFRAMES) -> StrategyGenome:
+def mutate(g: StrategyGenome, rng: np.random.Generator, timeframes=TIMEFRAMES, symbols=None) -> StrategyGenome:
     g = StrategyGenome.from_dict(g.to_dict())
     g.origin = "mutation"
     r = rng.random()
@@ -126,6 +129,8 @@ def mutate(g: StrategyGenome, rng: np.random.Generator, timeframes=TIMEFRAMES) -
             g.filters.pop(int(rng.integers(len(g.filters))))
     elif r < 0.82:
         g.tf = str(timeframes[int(rng.integers(len(timeframes)))])
+    elif r < 0.86 and symbols:
+        g.symbol = str(symbols[int(rng.integers(len(symbols)))])
     elif r < 0.9:
         g.direction = str(rng.choice(["both", "long", "short"]))
     elif r < 0.95:
@@ -140,4 +145,5 @@ def crossover(a: StrategyGenome, b: StrategyGenome, rng: np.random.Generator) ->
     pick = lambda x, y: copy.deepcopy(x if rng.random() < 0.5 else y)  # noqa: E731
     return StrategyGenome(tf=pick(a.tf, b.tf), entry=pick(a.entry, b.entry), filters=pick(a.filters, b.filters),
                           exit=pick(a.exit, b.exit), sizing=pick(a.sizing, b.sizing),
-                          direction=pick(a.direction, b.direction), origin="crossover")
+                          direction=pick(a.direction, b.direction), symbol=pick(a.symbol, b.symbol),
+                          origin="crossover")
