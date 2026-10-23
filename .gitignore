@@ -18,3 +18,4 @@ dashboard_export/
 research/
 data/ideas/
 *.backup_*.sqlite
+data/ideas_*/

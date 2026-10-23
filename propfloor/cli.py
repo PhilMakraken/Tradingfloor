@@ -81,7 +81,8 @@ def cmd_factory(args):
     llm = ClaudeResearcher.maybe(db) if args.llm else None
     if args.llm and llm is None:
         print("Claude researcher unavailable (set ANTHROPIC_API_KEY and `pip install anthropic`); continuing without it")
-    f = Factory(ev, db, seed=args.seed, pop_size=args.pop, candidate_threshold=args.threshold, llm=llm)
+    f = Factory(ev, db, seed=args.seed, pop_size=args.pop, candidate_threshold=args.threshold, llm=llm,
+                idea_dir=args.idea_dir)
     f.run(max_generations=args.generations, max_hours=args.hours)
 
 
@@ -158,6 +159,7 @@ def main(argv=None):
     x.add_argument("--threshold", type=float, default=0.15)
     x.add_argument("--seed", type=int, default=None)
     x.add_argument("--llm", action="store_true", help="use Claude for idea generation/critique")
+    x.add_argument("--idea-dir", default="data/ideas", help="folder of queued strategy-idea JSON files")
     x.set_defaults(fn=cmd_factory)
 
     fl = sub.add_parser("floor").add_subparsers(dest="cmd", required=True)
