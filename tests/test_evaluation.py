@@ -96,3 +96,12 @@ def test_short_holdout_judged_by_monte_carlo(program):
     short = mk(rng.choice([3.0, -1.0], p=[0.4, 0.6], size=40))  # good edge, too few trades to finish 2 stages
     res = sim.evaluate(short, 20, 20, mc_len=600)
     assert summarize(res)["p_pass_all"] < summarize(res, mc_only=True)["p_pass_all"]
+
+
+def test_sparse_trades_long_mc_do_not_overflow_timestamps(program):
+    sim = ChallengeSimulator(program, risk_per_trade=0.005)
+    sparse = mk([0.5, -1.0, 2.0, -1.0, 1.5] * 4)
+    sparse["entry_time"] = pd.date_range("2019-01-01", periods=len(sparse), freq="200D", tz="UTC")
+    for c in ("exit_time", "mae_time", "mfe_time"):
+        sparse[c] = sparse["entry_time"] + pd.Timedelta(hours=3)
+    summarize(sim.evaluate(sparse, 3, 5, mc_len=2000), mc_only=True)  # used to raise OutOfBoundsDatetime

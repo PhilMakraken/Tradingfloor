@@ -96,6 +96,12 @@ class TradeArrays:
         g = np.maximum(g, hold[idx] + 1)  # never overlap: next entry after previous exit
         start = self.entry[0]
         entry = start + np.concatenate([[0], np.cumsum(g[:-1])])
+        # sparse strategies x long MC sequences can run past pandas' Timestamp range (year 2262):
+        # truncate there (conservative - the run just ends "exhausted")
+        keep = int(np.searchsorted(entry + hold[idx], _TS_LIMIT))
+        if keep < n_out:
+            n_out, idx, entry = max(keep, 1), idx[:max(keep, 1)], entry[:max(keep, 1)]
+            new.n = n_out
         new.entry = entry
         new.exit = entry + hold[idx]
         new.mae_t = entry + (self.mae_t[idx] - self.entry[idx])
@@ -103,6 +109,9 @@ class TradeArrays:
         for a in ("pnl", "mae", "mfe", "post", "stop_pips", "side"):
             setattr(new, a, getattr(self, a)[idx])
         return new
+
+
+_TS_LIMIT = pd.Timestamp("2200-01-01", tz="UTC").value
 
 
 def _ts(v: int) -> pd.Timestamp:
@@ -176,7 +185,7 @@ class ChallengeSimulator:
             payouts, hwm = self._payout(acc, payouts, hwm)
         s = acc.state
         end_t = s.last_time
-        days = (end_t - _ts(t0)).total_seconds() / 86400 if end_t is not None else 0.0
+        days = (end_t.value - int(t0)) / 86_400e9 if end_t is not None else 0.0
         status = acc.status if acc.status != "active" else ("survived" if funded else "exhausted")
         reason = acc.violation.rule if acc.violation else None
         return StageResult(status, reason, days, s.n_trades, i, end_t, payouts, s.min_equity_buffer)
