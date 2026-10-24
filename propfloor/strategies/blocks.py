@@ -576,4 +576,4 @@ def sample_params(space: Space, rng: np.random.Generator) -> dict:
 
 
 # extended catalogues register themselves on import
-from propfloor.strategies import blocks_ext, blocks_intermarket, blocks_meta, blocks_stat  # noqa: E402,F401
+from propfloor.strategies import blocks_ext, blocks_intermarket, blocks_meta, blocks_stat, blocks_user  # noqa: E402,F401
