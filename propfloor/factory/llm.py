@@ -125,7 +125,14 @@ def _clip(params: dict, space: dict) -> dict:
         elif spec[0] == "float":
             out[k] = float(min(max(float(v), spec[1]), spec[2])) if isinstance(v, (int, float)) else sample_param(spec, rng)
         else:
-            out[k] = v if v in spec[1] else sample_param(spec, rng)
+            choices = spec[1]
+            nums = [c for c in choices if isinstance(c, (int, float)) and not isinstance(c, bool)]
+            if v in choices:
+                out[k] = v
+            elif isinstance(v, (int, float)) and not isinstance(v, bool) and nums:
+                out[k] = min(nums, key=lambda c: abs(c - v))  # snap to the nearest allowed value, never random
+            else:
+                out[k] = sample_param(spec, rng)
     return out
 
 

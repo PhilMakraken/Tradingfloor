@@ -90,3 +90,9 @@ def test_queued_ideas_are_consumed(tmp_path):
     assert not list(ideas.glob("*.json")) and (ideas / "done" / "agent1.json").exists()
     assert any(r["origin"] == "claude:agent1" for r in f.db.query("SELECT origin FROM strategies"))
     assert f.db.n_trials == len(f.db.query("SELECT id FROM strategies"))
+
+
+def test_out_of_range_choice_snaps_to_nearest():
+    g = coerce({"entry": {"name": "donchian_breakout", "params": {"n": 20}}, "tf": "H4",
+                "exit": {"sl_atr": 3.0, "tp_r": 0.0, "trail_atr": 4.0, "trail_type": "chandelier"}})
+    assert g.exit["trail_atr"] == 3.0 and g.exit["trail_type"] == "chandelier"
