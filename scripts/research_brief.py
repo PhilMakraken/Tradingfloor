@@ -39,5 +39,5 @@ L += ["", "## Effort and best fitness by entry block", ", ".join(f"{r['e']}:{r['
       "## By symbol (tried / best fitness / best OOS pass)", ", ".join(f"{r['symbol']}:{r['n']}/{r['f']:.2f}/{(r['o'] or 0):.2f}" for r in sym),
       "", "## By timeframe", ", ".join(f"{r['tf']}:{r['n']}/{r['f']:.2f}/{(r['o'] or 0):.2f}" for r in tf),
       "", "## Rejection reasons (counts)", *[f"- {k}: {v}" for k, v in reasons.most_common(10)]]
-(out / "state.md").write_text("\n".join(L))
-print("wrote research/catalogue.json and research/state.md")
+(out / "brief.md").write_text("\n".join(L))
+print("wrote research/catalogue.json and research/brief.md (research/state.md is the agents' shared log and is never overwritten)")
