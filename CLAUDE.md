@@ -29,6 +29,7 @@ Paper trading only.
 | `strategies/blocks_ext.py` | catalogue sections A-L, N, O (+ regime filters choppiness/autocorr/hurst/premium-discount) |
 | `strategies/blocks_intermarket.py` | section M + H5/H6: gold laggard, JPY risk filter, triangulation, lead-lag, safe-haven filter, basket strength, pair divergence, correlation breakdown |
 | `strategies/blocks_meta.py` | section P: vote_ensemble, regime_router (also H4), ml_classifier (walk-forward HistGradientBoosting, yearly refit) |
+| `strategies/blocks_stat.py` | user XAUUSD workbook High-feasibility OHLC families: entry `stat_feature` (feature x window -> robust z -> learned(train_mask corr sign)/momentum/fade -> ±z_thr cross) + filter `stat_regime`; 14 causal features (fractal_dim, hurst, perm_entropy, acf_sum, skew, kurt, semivar, vol_of_vol, dd_hazard, range_disagree, path_eff, run_length, sign_entropy, xagg_acf) |
 | `strategies/genome.py` | `StrategyGenome` (entry+filters+exit+params, json-serialisable, hash id), random generation, mutation, crossover |
 | `strategies/backtest.py` | numba bar-by-bar engine -> trade list with pnl in R, MAE/MFE in R, order flag, stop distance, timestamps |
 | `evaluation/challenge.py` | simulated challenges: many random start dates x Monte Carlo trade reshuffle/bootstrapping through `Account`+`RiskManager`+rules => P(pass) per stage, median days, breach causes, funded survival & payouts |

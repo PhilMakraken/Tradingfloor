@@ -96,7 +96,11 @@ def test_force_flat_before_weekend(ctx):
 def test_all_blocks_run_without_lookahead(ctx):
     rng = np.random.default_rng(0)
     cut = ctx.n - 50
+    # in-sample-fitted blocks (e.g. stat_feature mode=learned) are causal w.r.t. a FIXED train_end,
+    # as in walk-forward evaluation; pin it so both histories share the same training period
+    ctx = Ctx(ctx.df, "EURUSD", "H1")
     short = Ctx(ctx.df.iloc[:cut], "EURUSD", "H1")
+    ctx.train_end = short.train_end = ctx.time[int(ctx.n * 0.7)]
     for name, b in {**ENTRIES, **FILTERS}.items():
         p = sample_params(b.space, rng)
         lo, sh = b.fn(ctx, p)
