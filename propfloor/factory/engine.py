@@ -40,6 +40,7 @@ class Factory:
         self.llm_n = llm_n
         self.generation = int(db.get_meta("generation", 0))
         self.idea_dir: Path | None = Path(idea_dir) if idea_dir else None
+        self._pending_files: list[Path] = []
         self.symbols = evaluator.u.symbols
         self.tfs = evaluator.u.timeframes
 
@@ -110,7 +111,7 @@ class Factory:
                         out.append(g)
             except Exception as e:  # noqa: BLE001
                 log.warning("bad idea file %s: %s", f.name, e)
-            f.rename(done / f.name)
+            self._pending_files.append(f)  # moved to done/ only after the generation is scored (survives restarts)
         if out:
             log.info("loaded %d queued strategy ideas", len(out))
         return out
@@ -153,8 +154,14 @@ class Factory:
 
     def step(self) -> dict:
         t0 = time.time()
+        self._pending_files = []
         pop = self.population()
         fits = [f for g in pop if (f := self.evaluate(g)) is not None]
+        if self._pending_files:
+            done = self.idea_dir / "done"
+            for f in self._pending_files:
+                if f.exists():
+                    f.rename(done / f.name)
         self.generation += 1
         self.db.set_meta("generation", self.generation)
         stats = {"generation": self.generation, "evaluated": len(fits), "best": max(fits, default=None),
