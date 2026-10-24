@@ -97,7 +97,7 @@ def server_clock(idx: pd.DatetimeIndex) -> pd.DatetimeIndex:
     return idx.tz_convert("America/New_York").tz_localize(None) + pd.Timedelta(hours=7)
 
 
-TF_HOURS = {"H1": 1, "H2": 2, "H4": 4, "H12": 12, "D1": 24}
+TF_HOURS = {"M15": 0.25, "M30": 0.5, "H1": 1, "H2": 2, "H4": 4, "H12": 12, "D1": 24}
 
 
 class Frames:
@@ -120,7 +120,7 @@ class Frames:
         tf = tf.upper()
         if tf not in self._cache:
             hrs = TF_HOURS[tf]
-            key = self.srv.normalize() if hrs == 24 else self.srv.floor(f"{hrs}h")
+            key = self.srv.normalize() if hrs == 24 else self.srv.floor(f"{int(hrs * 60)}min")
             codes, uniq = pd.factorize(key)  # key is monotone -> codes increase
             df = pd.DataFrame({"o": self.o, "h": self.h, "l": self.l, "c": self.c, "v": self.v, "k": codes})
             g = df.groupby("k", sort=True)
@@ -199,6 +199,7 @@ class Book:
         self.pause_dd = float(params.get("Pause New Trades At Account Drawdown %", 20.0))
         self.peak, self.half, self.pause = 0.0, False, False
         self.partial_pct, self.breakeven = float(partial_pct), bool(breakeven)
+        self.partial_be_r = 0.0  # stop after partial = entry + be_r x initial risk (SRC "Stop after partial")
         self.pos: Pos | None = None
         self.trades: list[dict] = []
         self.half_trades = 0
@@ -251,13 +252,21 @@ class Book:
     # --- orders
     def open(self, d: int, t, bid: float, units: float, stop_dist: float | None, tp_dist: float | None,
              i_sig: int, partial_r: float | None = None, info: dict | None = None, half: bool = False) -> Pos:
-        fill = (bid + self.c.spread + self.c.slippage) if d > 0 else (bid - self.c.slippage)
+        fill = self.market_fill(d, bid)
         sl = round(fill - d * stop_dist, 2) if stop_dist else None
         tp = round(fill + d * tp_dist, 2) if tp_dist else None
-        p = Pos(d, units, fill, sl, tp, t, i_sig, stop_dist or 0.0, units0=units, best=fill, info=info or {})
+        self.half_trades += int(half)
+        return self.open_fill(d, t, fill, units, sl, tp, i_sig, stop_dist or 0.0, partial_r, info)
+
+    def market_fill(self, d: int, bid: float) -> float:
+        return (bid + self.c.spread + self.c.slippage) if d > 0 else (bid - self.c.slippage)
+
+    def open_fill(self, d: int, t, fill: float, units: float, sl: float | None, tp: float | None, i_sig: int,
+                  stop_dist: float, partial_r: float | None = None, info: dict | None = None) -> Pos:
+        """Open at a known fill price with absolute stop / target prices."""
+        p = Pos(d, units, fill, sl, tp, t, i_sig, stop_dist, units0=units, best=fill, info=info or {})
         if partial_r is not None and stop_dist:
             p.partial_level, p.partial_done = fill + d * partial_r * stop_dist, False
-        self.half_trades += int(half)
         self.pos = p
         return p
 
@@ -296,7 +305,7 @@ class Book:
         if cv >= UNIT_STEP and p.units - cv >= UNIT_STEP:
             self.close(cv, x, t, "partial")
         if self.breakeven and self.pos is not None:
-            be = round(p.entry, 2)
+            be = round(p.entry + p.dir * self.partial_be_r * p.stop_dist, 2)
             if p.sl is None or p.dir * (be - p.sl) > 0:
                 p.sl = be
 
@@ -335,6 +344,8 @@ def _finish(book: Book, fr: Frames, eq: np.ndarray, trade_start) -> pd.DataFrame
         eq[-1] = book.balance
     df = pd.DataFrame(book.trades, columns=["entry_time", "exit_time", "side", "entry", "exit", "pnl_r", "net", "units",
                                             "stop_dist", "balance", "n_closes", "partial", "reason", "info"])
+    for col in ("entry_time", "exit_time"):
+        df[col] = pd.to_datetime(df[col], utc=True).astype("datetime64[ns, UTC]")
     m = np.ones(fr.n, bool) if trade_start is None else np.asarray(fr.t >= pd.Timestamp(trade_start, tz="UTC"))
     df.attrs["equity"] = pd.Series(eq[m], index=fr.t[m])
     df.attrs["half_risk_trades"] = book.half_trades
@@ -714,6 +725,501 @@ def run_bot7(m15: pd.DataFrame, params: dict | None = None, costs: Costs | None 
             book.segment(a0, a1, t)
         eq[j] = book.equity(c)
     return _finish(book, fr, eq, trade_start)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# SRC round-5 cBots (SrcV1LondonMorning, SrcV2Main, SrcV8MarketEntry): M15 APPROXIMATION of M5 bots
+# ---------------------------------------------------------------------------------------------------------------
+# The three files share one engine; only defaults and FiltersAllow differ. The originals run on M5 bars with
+# UK-clock windows. Here the chart bars are M15: every M5 bar count (range lookback, anchor lookback, limit
+# validity, time stop, pivot strength, ATR and volume periods) is divided by 3, and the M5 ATR(14) is approximated
+# by RMA(TR_M15, 5) / sqrt(3) (random-walk scaling; our gold data gives TR(H1)/TR(M15) = 4^0.52, i.e. M15/M5 ~1.78).
+SRC_ENGINE = {"Max trades per UK calendar day (counted on close)": 1, "Use the variant's indicator filters": True,
+              "Window 1 on": False, "Window 1 start": "13:00", "Window 1 end": "14:30", "Window 2 on": True,
+              "Window 2 start": "14:30", "Window 2 end": "17:00", "Window 3 on": True, "Window 3 start": "23:00",
+              "Window 3 end": "02:00", "Range mode: 0 fixed at window open, 1 rolling, 2 last confirmed swings": 1,
+              "Range lookback (5M bars)": 144, "Swing strength for mode 2 (bars each side)": 2,
+              "Min range height (x ATR, 0 = none)": 4.0, "Max range height (x ATR, 0 = none)": 0.0,
+              "Break buffer beyond the level (x ATR)": 0.25, "Entry mode: 0 limit at fib, 1 market on break close": 0,
+              "Fib entry level (pullback of breakout move)": 0.3, "Anchor swing lookback (5M bars)": 12,
+              "Re-anchor if the breakout extends before the fill": True, "Limit order validity (5M bars)": 6,
+              "Cancel the limit if price reaches the target first": False,
+              "Stop mode: 0 beyond anchor + k x ATR, 1 entry +/- k x ATR, 2 fib k of the move beyond extreme": 0,
+              "Stop parameter k": 1.0, "Min stop distance (x ATR, 0 = none)": 0.0,
+              "Max stop distance (x ATR, 0 = none)": 0.0,
+              "Target mode: 0 fixed R:R, 1 further of R:R and fib extension": 0, "Target R:R": 6.0,
+              "Fib extension for target mode 1": 1.0, "Breakeven trigger (R, 0 = none)": 0.5,
+              "Breakeven lock (R)": 0.2, "Trailing stop distance behind best close (R, 0 = none)": 0.0,
+              "Partial take-profit at (R, 0 = none)": 0.0, "Partial fraction closed": 0.3,
+              "Stop after partial: entry + (R)": 0.0, "Time stop (5M bars after fill, 0 = none)": 576,
+              "Risk % of equity per trade (portfolio weight; use a quarter to start)": 1.0}
+SRC1_PARAMS = {**SRC_ENGINE, "Window 1 on": True, "Window 1 start": "08:00", "Window 1 end": "12:00",
+               "Window 2 on": False, "Window 2 end": "18:00", "Window 3 on": False,
+               "Range mode: 0 fixed at window open, 1 rolling, 2 last confirmed swings": 0,
+               "Range lookback (5M bars)": 24, "Swing strength for mode 2 (bars each side)": 5,
+               "Max range height (x ATR, 0 = none)": 30.0, "Break buffer beyond the level (x ATR)": 0.0,
+               "Limit order validity (5M bars)": 144,
+               "Stop mode: 0 beyond anchor + k x ATR, 1 entry +/- k x ATR, 2 fib k of the move beyond extreme": 2,
+               "Stop parameter k": 2.5, "Min stop distance (x ATR, 0 = none)": 1.0,
+               "Target mode: 0 fixed R:R, 1 further of R:R and fib extension": 1, "Target R:R": 8.0,
+               "Fib extension for target mode 1": 0.27, "Breakeven trigger (R, 0 = none)": 0.0,
+               "Trailing stop distance behind best close (R, 0 = none)": 3.0,
+               "Partial take-profit at (R, 0 = none)": 3.0, "Partial fraction closed": 0.5}
+SRC2_PARAMS = dict(SRC_ENGINE)
+SRC8_PARAMS = {**SRC_ENGINE, "Window 1 end": "16:00", "Range lookback (5M bars)": 192,
+               "Swing strength for mode 2 (bars each side)": 3, "Min range height (x ATR, 0 = none)": 8.0,
+               "Max range height (x ATR, 0 = none)": 30.0, "Entry mode: 0 limit at fib, 1 market on break close": 1,
+               "Fib entry level (pullback of breakout move)": 0.618,
+               "Re-anchor if the breakout extends before the fill": False, "Limit order validity (5M bars)": 12,
+               "Min stop distance (x ATR, 0 = none)": 0.5, "Fib extension for target mode 1": 0.618,
+               "Breakeven trigger (R, 0 = none)": 2.0, "Partial fraction closed": 0.5}
+SRC_PARAMS = {"SRC1": SRC1_PARAMS, "SRC2": SRC2_PARAMS, "SRC8": SRC8_PARAMS}
+M5_PER_BAR = 3  # M5 bars per M15 chart bar
+
+
+def _m5(n: int) -> int:
+    return max(1, int(round(n / M5_PER_BAR)))
+
+
+def rma(x: np.ndarray, n: int) -> np.ndarray:
+    """AtrRma: running mean for the first n values, then Wilder smoothing."""
+    out = np.empty(len(x))
+    a = 0.0
+    for i in range(len(x)):
+        a += (x[i] - a) / (i + 1 if i < n else n)
+        out[i] = a
+    return out
+
+
+def stoch_kd(h: np.ndarray, l: np.ndarray, c: np.ndarray, n: int = 14, ks: int = 3, d: int = 3):
+    hh = pd.Series(h).rolling(n).max().to_numpy()
+    ll = pd.Series(l).rolling(n).min().to_numpy()
+    rng = hh - ll
+    raw = np.where(rng > 0, 100.0 * (c - ll) / np.where(rng > 0, rng, 1.0), 50.0)
+    k = pd.Series(raw).rolling(ks).mean().to_numpy()
+    return k, pd.Series(k).rolling(d).mean().to_numpy()
+
+
+def structure(h: np.ndarray, l: np.ndarray, s: int) -> np.ndarray:
+    """Structure(b, s, idx) for every idx: +1 HH+HL, -1 LH+LL, 0 otherwise (strict pivots, confirmed s bars later)."""
+    n = len(h)
+    out = np.zeros(n, np.int64)
+    ph = [np.nan, np.nan]  # most recent, previous
+    pl = [np.nan, np.nan]
+    for idx in range(n):
+        j = idx - s
+        if j - s >= 0 and j >= s:
+            wh, wl = h[j - s: j + s + 1], l[j - s: j + s + 1]
+            if (np.delete(wh, s) < h[j]).all():
+                ph = [h[j], ph[0]]
+            if (np.delete(wl, s) > l[j]).all():
+                pl = [l[j], pl[0]]
+        if np.isnan(ph[1]) or np.isnan(pl[1]):
+            continue
+        if ph[0] > ph[1] and pl[0] > pl[1]:
+            out[idx] = 1
+        elif ph[0] < ph[1] and pl[0] < pl[1]:
+            out[idx] = -1
+    return out
+
+
+def _hhmm(x: str) -> int:
+    hh, mm = x.strip().split(":")[:2]
+    return int(hh) * 60 + int(mm)
+
+
+class _SrcFilters:
+    """FiltersAllow(isLong, i, t) for one variant; every higher-TF value is read at the last bar completed by t."""
+
+    def __init__(self, variant: str, fr: Frames, vol_n: int) -> None:
+        self.v = variant
+        self.fr = fr
+        self.vol_n = vol_n
+        self.tf = {}
+        for tf in ("M15", "M30", "H1", "H4", "D1"):
+            b, code = fr.bars(tf)
+            self.tf[tf] = (b, code, b["high"].to_numpy(), b["low"].to_numpy(), b["close"].to_numpy())
+        b4, bd = self.tf["H4"], self.tf["D1"]
+        self.st4 = structure(b4[2], b4[3], 2)
+        self.stD = structure(bd[2], bd[3], 5)
+        if variant == "SRC1":
+            m = self.tf["M15"]
+            self.k15, self.d15 = stoch_kd(m[2], m[3], m[4])
+            self.e20 = ema_seeded(m[4], 20)
+            self.e50_4 = ema_seeded(b4[4], 50)
+        elif variant == "SRC2":
+            h1 = self.tf["H1"]
+            self.k1, _ = stoch_kd(h1[2], h1[3], h1[4])
+            self.kD, _ = stoch_kd(bd[2], bd[3], bd[4])
+        else:
+            m30 = self.tf["M30"]
+            self.eD100 = ema_seeded(bd[4], 100)
+            self.e50_30 = ema_seeded(m30[4], 50)
+        self.vol = fr.v
+
+    def last(self, tf: str, i: int) -> int:
+        return int(self.tf[tf][1][i]) - 1  # bar containing the open time of chart bar i, minus one
+
+    def vol_ok(self, i: int, k: float) -> bool:
+        n = self.vol_n
+        if i - n < 0:
+            return False
+        return self.vol[i] >= k * self.vol[i - n:i].mean()
+
+    def allow(self, is_long: bool, i: int) -> bool:
+        sgn = 1 if is_long else -1
+        not_against = (lambda st: st != -1) if is_long else (lambda st: st != 1)
+        if self.v == "SRC1":
+            i15 = self.last("M15", i)
+            if i15 < 60 or not sgn * (self.k15[i15] - self.d15[i15]) > 0:
+                return False
+            if not sgn * (self.e20[i15] - self.e20[i15 - 3]) > 0:
+                return False
+            i4 = self.last("H4", i)
+            if i4 < 60 or not sgn * (self.tf["H4"][4][i4] - self.e50_4[i4]) > 0 or not not_against(self.st4[i4]):
+                return False
+            iD = self.last("D1", i)
+            return iD >= 30 and not_against(self.stD[iD])
+        if self.v == "SRC2":
+            i1 = self.last("H1", i)
+            if i1 < 30 or not sgn * (self.k1[i1] - 50) > 0:
+                return False
+            iD = self.last("D1", i)
+            if iD < 30 or not sgn * (self.kD[iD] - 50) > 0 or not not_against(self.stD[iD]):
+                return False
+            i4 = self.last("H4", i)
+            if i4 < 30 or not not_against(self.st4[i4]):
+                return False
+            return self.vol_ok(i, 0.8)
+        iD = self.last("D1", i)
+        if iD < 300 or not not_against(self.stD[iD]):
+            return False
+        i4 = self.last("H4", i)
+        if i4 < 30 or not not_against(self.st4[i4]):
+            return False
+        if not self.vol_ok(i, 1.0):
+            return False
+        if not sgn * (self.tf["D1"][4][iD] - self.eD100[iD]) > 0:
+            return False
+        i30 = self.last("M30", i)
+        return i30 >= 200 and sgn * (self.e50_30[i30] - self.e50_30[i30 - 3]) > 0
+
+
+def run_src(m15: pd.DataFrame, variant: str, params: dict | None = None, costs: Costs | None = None,
+            balance: float = 10_000.0, trade_start=None) -> pd.DataFrame:
+    """M15 approximation of one SRC round-5 cBot (variant 'SRC1', 'SRC2' or 'SRC8')."""
+    P = _p(params, SRC_PARAMS[variant])
+    costs = costs or Costs.from_program()
+    fr = Frames(m15)
+    uk = fr.t.tz_convert("Europe/London").tz_localize(None)
+    H, L, C, O = fr.h, fr.l, fr.c, fr.o
+    atr = rma(true_range(H, L, C), _m5(14)) / math.sqrt(M5_PER_BAR)
+    filt = _SrcFilters(variant, fr, _m5(20))
+    risk_pct = float(P["Risk % of equity per trade (portfolio weight; use a quarter to start)"])
+    max_day = int(P["Max trades per UK calendar day (counted on close)"])
+    use_f = bool(P["Use the variant's indicator filters"])
+    wins = [(bool(P[f"Window {w} on"]), _hhmm(P[f"Window {w} start"]), _hhmm(P[f"Window {w} end"])) for w in (1, 2, 3)]
+    rmode = int(P["Range mode: 0 fixed at window open, 1 rolling, 2 last confirmed swings"])
+    rbars = _m5(int(P["Range lookback (5M bars)"]))
+    pstr = _m5(int(P["Swing strength for mode 2 (bars each side)"]))
+    min_rng, max_rng = float(P["Min range height (x ATR, 0 = none)"]), float(P["Max range height (x ATR, 0 = none)"])
+    buf_k = float(P["Break buffer beyond the level (x ATR)"])
+    emode = int(P["Entry mode: 0 limit at fib, 1 market on break close"])
+    fib = float(P["Fib entry level (pullback of breakout move)"])
+    swing_lb = _m5(int(P["Anchor swing lookback (5M bars)"]))
+    re_anchor = bool(P["Re-anchor if the breakout extends before the fill"])
+    valid = _m5(int(P["Limit order validity (5M bars)"]))
+    cancel_tp = bool(P["Cancel the limit if price reaches the target first"])
+    slmode = int(P["Stop mode: 0 beyond anchor + k x ATR, 1 entry +/- k x ATR, 2 fib k of the move beyond extreme"])
+    slk = float(P["Stop parameter k"])
+    min_risk, max_risk = float(P["Min stop distance (x ATR, 0 = none)"]), float(P["Max stop distance (x ATR, 0 = none)"])
+    tpmode = int(P["Target mode: 0 fixed R:R, 1 further of R:R and fib extension"])
+    rr, tpext = float(P["Target R:R"]), float(P["Fib extension for target mode 1"])
+    be_trig, be_lock = float(P["Breakeven trigger (R, 0 = none)"]), float(P["Breakeven lock (R)"])
+    trail_r = float(P["Trailing stop distance behind best close (R, 0 = none)"])
+    part_r, part_frac = float(P["Partial take-profit at (R, 0 = none)"]), float(P["Partial fraction closed"])
+    part_be = float(P["Stop after partial: entry + (R)"])
+    tstop = _m5(int(P["Time stop (5M bars after fill, 0 = none)"])) if int(P["Time stop (5M bars after fill, 0 = none)"]) else 0
+    book = Book(costs, balance, {"Use Portfolio Stop Rules": False}, partial_pct=part_frac * 100, breakeven=True)
+    book.partial_be_r = part_be
+    ok = _start_mask(fr, trade_start)
+    eq = np.empty(fr.n)
+
+    S = {"dir": 0, "anchor": 0.0, "extreme": 0.0, "entry": 0.0, "sl": 0.0, "tp": 0.0, "risk": 0.0, "atr": 0.0,
+         "pend": False, "expiry": None, "fill_bar": -1, "best": 0.0, "be_done": False, "had": False,
+         "today": None, "trades_today": 0, "in_window": False, "have_range": False, "win_end": None,
+         "RH": 0.0, "RL": 0.0, "info": {}}
+    win_day = [None, None, None]
+
+    def compute_range(i: int) -> None:
+        j0 = max(1, i - rbars)
+        if rmode == 2:
+            ph = pl = -1.0
+            s = pstr
+            for j in range(i - 1 - s, j0 + s, -1):
+                if ph < 0 and j - s >= 0 and (np.delete(H[j - s:j + s + 1], s) < H[j]).all():
+                    ph = H[j]
+                if pl < 0 and j - s >= 0 and (np.delete(L[j - s:j + s + 1], s) > L[j]).all():
+                    pl = L[j]
+                if ph > 0 and pl > 0:
+                    break
+            if ph > 0 and pl > 0 and ph > pl:
+                S["RH"], S["RL"] = ph, pl
+                return
+        S["RH"], S["RL"] = H[j0:i].max(), L[j0:i].min()
+
+    def on_filled(j: int, _t, fill: float, units: float, bid_now: float) -> None:
+        t = fr.t[j]  # fills happen during chart bar j (UTC timestamps in the trade list)
+        d = S["dir"]
+        S["fill_bar"], S["best"], S["be_done"], S["had"] = j, fill, False, True
+        sl = S["sl"]
+        if slmode == 1 and emode == 1:
+            sl = fill - d * slk * S["atr"]
+        risk = (fill - sl) * d
+        if emode == 1:
+            tp = fill + d * rr * risk
+            if tpmode == 1:
+                alt = S["extreme"] + d * tpext * abs(S["extreme"] - S["anchor"])
+                if (alt - tp) * d > 0:
+                    tp = alt
+            S["tp"] = tp
+        S["risk"] = risk
+        book.open_fill(d, t, fill, units, round(sl, 2), round(S["tp"], 2), j, max(risk, 0.0),
+                       partial_r=part_r if part_r > 0 else None, info=dict(S["info"], fill=fill, risk=risk))
+        if risk <= 0:  # "Fill beyond the stop level; closing."
+            book.pos.stop_dist = abs(risk) or 1e-9
+            book.close_all(bid_now, t, "fill_beyond_stop")
+
+    def place_or_cancel(j: int, t) -> None:
+        bid = O[j]
+        units = book.units_for(risk_pct * book.equity(bid) / max(book.balance, 1e-9), S["risk"])
+        if units < UNIT_STEP:
+            S["dir"] = 0
+            return
+        d = S["dir"]
+        cur = bid + costs.spread if d > 0 else bid
+        if (cur - S["entry"]) * d <= 0:  # limit already reached -> market
+            on_filled(j, t, book.market_fill(d, bid), units, bid)
+            return
+        S["pend"], S["units"] = True, units
+
+    def detect_break(i: int, j: int, t) -> None:
+        if rmode == 1:
+            compute_range(i)
+        a = atr[i]
+        if a <= 0:
+            return
+        rng = S["RH"] - S["RL"]
+        if min_rng > 0 and rng < min_rng * a:
+            return
+        if max_rng > 0 and rng > max_rng * a:
+            return
+        buf = buf_k * a
+        c, cp = C[i], C[i - 1]
+        d = 0
+        if c > S["RH"] + buf and cp <= S["RH"] and (not use_f or filt.allow(True, i)):
+            d = 1
+        elif c < S["RL"] - buf and cp >= S["RL"] and (not use_f or filt.allow(False, i)):
+            d = -1
+        if d == 0:
+            return
+        j0 = max(0, i - swing_lb + 1)
+        anc = L[j0:i + 1].min() if d > 0 else H[j0:i + 1].max()
+        ext = H[i] if d > 0 else L[i]
+        move = abs(ext - anc)
+        if move <= 0:
+            return
+        en = ext - d * fib * move
+        s = anc - d * slk * a if slmode == 0 else (en - d * slk * a if slmode == 1 else ext - d * slk * move)
+        rk = (en - s) * d
+        if emode == 0:
+            if rk <= 0 or (min_risk > 0 and rk < min_risk * a) or (max_risk > 0 and rk > max_risk * a):
+                return
+        target = en + d * rr * rk
+        if tpmode == 1:
+            alt = ext + d * tpext * move
+            if (alt - target) * d > 0:
+                target = alt
+        S.update(dir=d, anchor=anc, extreme=ext, entry=en, sl=s, tp=target, risk=rk, atr=a, be_done=False)
+        S["info"] = {"break_bar_uk": str(t), "RH": S["RH"], "RL": S["RL"], "close": c, "prev_close": cp, "atr": a,
+                     "anchor": anc, "extreme": ext, "limit": en, "stop": s, "target": target}
+        if emode == 1:
+            bid = O[j]
+            px = bid + costs.spread if d > 0 else bid
+            sl = px - d * slk * a if slmode == 1 else s
+            risk = (px - sl) * d
+            if risk <= 0 or (min_risk > 0 and risk < min_risk * a) or (max_risk > 0 and risk > max_risk * a):
+                S["dir"] = 0
+                return
+            S["sl"], S["risk"] = sl, risk
+            units = book.units_for(risk_pct * book.equity(bid) / max(book.balance, 1e-9), risk)
+            if units < UNIT_STEP:
+                S["dir"] = 0
+                return
+            on_filled(j, t, book.market_fill(d, bid), units, bid)
+            return
+        S["expiry"] = t + pd.Timedelta(minutes=15 * (valid + 1))
+        place_or_cancel(j, t)
+
+    def manage_pending_at_close(i: int, j: int, t) -> None:
+        if not re_anchor or S["dir"] == 0:
+            return
+        d = S["dir"]
+        if not ((H[i] > S["extreme"]) if d > 0 else (L[i] < S["extreme"])):
+            return
+        S["extreme"] = H[i] if d > 0 else L[i]
+        move = abs(S["extreme"] - S["anchor"])
+        S["entry"] = S["extreme"] - d * fib * move
+        if slmode == 1:
+            S["sl"] = S["entry"] - d * slk * atr[i]
+        elif slmode == 2:
+            S["sl"] = S["extreme"] - d * slk * move
+        S["risk"] = (S["entry"] - S["sl"]) * d
+        S["pend"] = False
+        if S["risk"] <= 0:
+            S["dir"] = 0
+            return
+        S["tp"] = S["entry"] + d * rr * S["risk"]
+        if tpmode == 1:
+            alt = S["extreme"] + d * tpext * move
+            if (alt - S["tp"]) * d > 0:
+                S["tp"] = alt
+        S["info"].update(limit=S["entry"], stop=S["sl"], target=S["tp"], re_anchored=True)
+        place_or_cancel(j, uk[i])
+
+    def manage_position_at_close(i: int, j: int, t) -> None:
+        p = book.pos
+        d = S["dir"] or p.dir
+        if tstop > 0 and S["fill_bar"] >= 0 and i - S["fill_bar"] >= tstop:
+            book.close_all(O[j], fr.t[j], "time_stop")
+            return
+        close = C[i]
+        cur = p.sl if p.sl is not None else S["sl"]
+        fp, risk = p.entry, S["risk"]
+        if be_trig > 0 and not S["be_done"] and (close - fp) * d >= be_trig * risk:
+            ns = round(fp + d * be_lock * risk, 2)
+            if (ns - cur) * d > 0:
+                p.sl, cur = ns, ns
+            S["be_done"] = True
+        if trail_r > 0:
+            if (close - S["best"]) * d > 0:
+                S["best"] = close
+            ns = round(S["best"] - d * trail_r * risk, 2)
+            if (ns - cur) * d > 0:
+                p.sl = ns
+                S["be_done"] = True
+
+    def pending_segment(j: int, b0: float, b1: float, gap: bool) -> float | None:
+        """Pending limit on the move b0 -> b1: returns the bid at which the order filled (None if not filled)."""
+        d = S["dir"]
+        if d > 0:
+            fill_bid, cancel_bid = S["entry"] - costs.spread, S["sl"]
+            if b1 < b0:
+                hits = sorted([(fill_bid, 0), (cancel_bid, 1)], key=lambda z: -z[0])
+                for lvl, kind in hits:
+                    if b1 <= lvl:
+                        if kind == 1:
+                            S["pend"], S["dir"] = False, 0
+                            return None
+                        return b1 if gap else min(b0, lvl)
+            elif cancel_tp and b1 >= S["tp"]:
+                S["pend"], S["dir"] = False, 0
+        else:
+            fill_bid, cancel_bid = S["entry"], S["sl"] - costs.spread
+            if b1 > b0:
+                for lvl, kind in sorted([(fill_bid, 0), (cancel_bid, 1)]):
+                    if b1 >= lvl:
+                        if kind == 1:
+                            S["pend"], S["dir"] = False, 0
+                            return None
+                        return b1 if gap else max(b0, lvl)
+            elif cancel_tp and b1 + costs.spread <= S["tp"]:
+                S["pend"], S["dir"] = False, 0
+        return None
+
+    for j in range(fr.n):
+        o, h, l, c, t = O[j], H[j], L[j], C[j], fr.t[j]
+        if not ok[j]:
+            eq[j] = book.balance
+            continue
+        segs = ([(C[j - 1], o, True)] if j > 0 else []) + [(a0, a1, False) for a0, a1 in
+                                                            zip(_path(o, h, l, c)[:-1], _path(o, h, l, c)[1:])]
+        # gap tick: server-side stops / pending expiry / limit fill, then OnBar for the bar that just closed
+        if S["pend"] and S["expiry"] is not None and uk[j] >= S["expiry"]:
+            S["pend"] = False
+        if j > 0:
+            b0, b1, _g = segs[0]
+            if book.pos is not None:
+                book.segment(b0, b1, t, gap=True)
+            elif S["pend"]:
+                fb = pending_segment(j, b0, b1, True)
+                if fb is not None:
+                    S["pend"] = False
+                    on_filled(j, t, fb + (costs.spread if S["dir"] > 0 else 0.0), S["units"], fb)
+            segs = segs[1:]
+            if book.pos is None and S["had"]:
+                S["had"], S["dir"] = False, 0
+                S["trades_today"] += 1
+            i = j - 1
+            if i >= rbars + 2 and i >= swing_lb + 2:
+                ti = uk[i]
+                if book.pos is not None:
+                    manage_position_at_close(i, j, ti)
+                elif S["pend"]:
+                    manage_pending_at_close(i, j, ti)
+                if S["today"] != ti.date():
+                    S["today"], S["trades_today"] = ti.date(), 0
+                mod = ti.hour * 60 + ti.minute
+                for w, (on, st, en) in enumerate(wins):
+                    if not on or not (st <= mod and win_day[w] != ti.date()):
+                        continue
+                    if en > st and not mod < en:
+                        continue
+                    win_day[w] = ti.date()
+                    compute_range(i)
+                    S["have_range"] = S["in_window"] = True
+                    S["win_end"] = pd.Timestamp(ti.date()) + pd.Timedelta(minutes=en) + pd.Timedelta(days=0 if en > st else 1)
+                    if S["pend"]:
+                        S["pend"], S["dir"] = False, 0
+                if S["in_window"] and ti >= S["win_end"]:
+                    S["in_window"] = False
+                if (book.pos is None and not S["pend"] and S["in_window"] and S["have_range"]
+                        and S["trades_today"] < max_day):
+                    detect_break(i, j, ti)
+        # intrabar path
+        for b0, b1, gap in segs:
+            if book.pos is not None:
+                book.segment(b0, b1, t, gap)
+            elif S["pend"]:
+                fb = pending_segment(j, b0, b1, gap)
+                if fb is not None:
+                    S["pend"] = False
+                    on_filled(j, t, fb + (costs.spread if S["dir"] > 0 else 0.0), S["units"], fb)
+                    if book.pos is not None:
+                        book.segment(fb, b1, t, gap)
+            if book.pos is None and S["had"]:
+                S["had"], S["dir"] = False, 0
+                S["trades_today"] += 1
+        eq[j] = book.equity(c)
+    out = _finish(book, fr, eq, trade_start)
+    out.attrs["approximation"] = "M15 approximation of an M5 cBot"
+    return out
+
+
+def run_src1(m15, params=None, costs=None, balance=10_000.0, trade_start=None):
+    return run_src(m15, "SRC1", params, costs, balance, trade_start)
+
+
+def run_src2(m15, params=None, costs=None, balance=10_000.0, trade_start=None):
+    return run_src(m15, "SRC2", params, costs, balance, trade_start)
+
+
+def run_src8(m15, params=None, costs=None, balance=10_000.0, trade_start=None):
+    return run_src(m15, "SRC8", params, costs, balance, trade_start)
+
+
+SRC_BOTS = {"SRC1_LondonMorning (M15 approx)": run_src1, "SRC2_Main (M15 approx)": run_src2,
+            "SRC8_MarketEntry (M15 approx)": run_src8}
 
 
 BOTS = {

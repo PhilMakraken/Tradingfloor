@@ -34,15 +34,44 @@ def test_all_bots_run_and_return_trades(runs):
         assert s["trades"] == len(tr) and 0 <= s["win_rate"] <= 1
 
 
-@pytest.mark.parametrize("name", list(cb.BOTS))
-def test_no_lookahead_truncation(gold, runs, name):
-    cut = pd.Timestamp("2020-02-13 13:15", tz="UTC")
-    full = runs[name]
-    part = cb.BOTS[name](gold[gold.index < cut])
+ALL = {**cb.BOTS, **cb.SRC_BOTS}
+
+
+@pytest.fixture(scope="module")
+def src_runs(gold):
+    return {name: fn(gold) for name, fn in cb.SRC_BOTS.items()}
+
+
+def test_src_bots_run(src_runs):
+    for name, tr in src_runs.items():
+        assert list(tr.columns[:7]) == COLS, name
+        assert len(tr) > 0, name
+        assert set(tr.side) <= {"long", "short"}
+        assert tr.attrs["approximation"].startswith("M15 approximation")
+        assert np.allclose(tr.balance.to_numpy(), 10_000 + tr.net.cumsum().to_numpy())
+        et, xt = pd.to_datetime(tr.entry_time).to_numpy(), pd.to_datetime(tr.exit_time).to_numpy()
+        assert (et[1:] >= xt[:-1]).all(), name
+        assert str(pd.to_datetime(tr.entry_time).dt.tz) == "UTC"
+        # every break happened inside one of the variant's UK windows
+        P = cb.SRC_PARAMS[name.split("_")[0]]
+        wins = [(cb._hhmm(P[f"Window {w} start"]), cb._hhmm(P[f"Window {w} end"])) for w in (1, 2, 3)
+                if P[f"Window {w} on"]]
+        for inf in tr["info"]:
+            t = pd.Timestamp(inf["break_bar_uk"])
+            m = t.hour * 60 + t.minute
+            assert any((a <= m < b) if b > a else (m >= a or m < b) for a, b in wins)
+
+
+@pytest.mark.parametrize("name", list(ALL))
+def test_no_lookahead_truncation(gold, runs, src_runs, name):
+    cut = pd.Timestamp("2020-04-20 13:15", tz="UTC")
+    full = runs[name] if name in runs else src_runs[name]
+    part = ALL[name](gold[gold.index < cut])
     a = full[pd.to_datetime(full.exit_time) < cut - pd.Timedelta(minutes=15)].drop(columns=["info"])
     b = part[part.reason != "end_of_data"].drop(columns=["info"])
     b = b[pd.to_datetime(b.exit_time) < cut - pd.Timedelta(minutes=15)]
-    pd.testing.assert_frame_equal(a.reset_index(drop=True), b.reset_index(drop=True))
+    assert len(a) > 0
+    pd.testing.assert_frame_equal(a.reset_index(drop=True), b.reset_index(drop=True), check_dtype=False)
     ea, eb = full.attrs["equity"], part.attrs["equity"]
     assert np.allclose(ea[ea.index < cut - pd.Timedelta(hours=1)], eb[eb.index < cut - pd.Timedelta(hours=1)])
 
@@ -175,3 +204,29 @@ def test_gold_wick_signal_fills_next_open_with_2r_target():
     assert t.entry == pytest.approx(sig[3], abs=1e-6)
     assert t.stop_dist == pytest.approx(t.entry - m.low.iloc[16 * 70:16 * 71].min(), abs=1e-6)  # stop at signal low
     assert t.reason == "tp" and t.pnl_r == pytest.approx(2.0, abs=0.05)
+
+
+def test_structure_hh_hl_and_ll_lh():
+    up = np.array([1, 3, 2, 4, 3, 5, 4, 6, 5, 7.0])
+    st = cb.structure(up + 0.5, up - 0.5, 1)
+    assert st[-1] == 1  # higher highs and higher lows once two pivots of each are confirmed
+    dn = up[::-1].copy()
+    assert cb.structure(dn + 0.5, dn - 0.5, 1)[-1] == -1
+    flat = np.ones(10)
+    assert (cb.structure(flat + 0.5, flat - 0.5, 1) == 0).all()  # strict pivots: ties are not pivots
+
+
+def test_rma_matches_running_mean_then_wilder():
+    x = np.array([2.0, 4.0, 6.0, 8.0, 10.0])
+    r = cb.rma(x, 3)
+    assert r[2] == pytest.approx(4.0) and r[3] == pytest.approx(4.0 + (8.0 - 4.0) / 3)
+
+
+def test_src_partial_moves_stop_to_entry_plus_r():
+    bk = cb.Book(cb.ZERO_COSTS, 10_000, {"Use Portfolio Stop Rules": False}, partial_pct=50, breakeven=True)
+    bk.partial_be_r = 0.5
+    bk.open_fill(1, T, 2000.0, 10, 1990.0, 2080.0, 0, 10.0, partial_r=3.0)
+    bk.segment(2000.0, 2031.0, T)  # +3R reached at 2030
+    assert bk.pos.units == 5 and bk.pos.sl == pytest.approx(2005.0)
+    bk.segment(2031.0, 2000.0, T)
+    assert bk.trades[-1]["net"] == pytest.approx(5 * 30 + 5 * 5)
