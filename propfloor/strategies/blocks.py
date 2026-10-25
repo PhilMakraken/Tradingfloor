@@ -20,7 +20,8 @@ from propfloor.strategies import indicators as ind
 
 Space = dict[str, tuple]  # name -> ("int", lo, hi) | ("float", lo, hi) | ("choice", [..])
 
-CACHE_MB = 256  # per-Ctx memo budget; keys include continuous params, so an unbounded memo grows forever
+CACHE_MB = 256  # per-Ctx memo ceiling; keys include continuous params, so an unbounded memo grows forever
+CACHE_ARRAYS = 48  # ...and at most ~this many full-length float arrays (60 symbol/tf contexts share the RAM)
 
 
 def _nbytes(v: Any) -> int:
@@ -56,7 +57,7 @@ class Ctx:
         self.train_end: pd.Timestamp | None = None  # in-sample end; statistics-fitting blocks must not look past it
         self._cache: OrderedDict[Any, Any] = OrderedDict()  # LRU, bounded by cache_mb
         self._cache_bytes = 0
-        self.cache_mb = CACHE_MB
+        self.cache_mb = min(CACHE_MB, max(CACHE_ARRAYS * self.n * 8 / 2**20, 1.0))
 
     def peer_close(self, sym: str) -> np.ndarray | None:
         """Close of another symbol aligned to this context's bars (forward-filled, causal)."""
