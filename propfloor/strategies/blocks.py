@@ -9,6 +9,7 @@ All arrays only use information available at the close of the current bar (no lo
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -18,6 +19,16 @@ import pandas as pd
 from propfloor.strategies import indicators as ind
 
 Space = dict[str, tuple]  # name -> ("int", lo, hi) | ("float", lo, hi) | ("choice", [..])
+
+CACHE_MB = 256  # per-Ctx memo budget; keys include continuous params, so an unbounded memo grows forever
+
+
+def _nbytes(v: Any) -> int:
+    if isinstance(v, np.ndarray):
+        return v.nbytes
+    if isinstance(v, (tuple, list)):
+        return sum(_nbytes(x) for x in v)
+    return 1 << 10
 
 
 class Ctx:
@@ -43,7 +54,9 @@ class Ctx:
         self.v = df["volume"].to_numpy(np.float64) if "volume" in df else np.ones(self.n)
         self.peers: dict[str, "Ctx"] = {}  # other symbols on the same timeframe (intermarket blocks)
         self.train_end: pd.Timestamp | None = None  # in-sample end; statistics-fitting blocks must not look past it
-        self._cache: dict[Any, Any] = {}
+        self._cache: OrderedDict[Any, Any] = OrderedDict()  # LRU, bounded by cache_mb
+        self._cache_bytes = 0
+        self.cache_mb = CACHE_MB
 
     def peer_close(self, sym: str) -> np.ndarray | None:
         """Close of another symbol aligned to this context's bars (forward-filled, causal)."""
@@ -67,9 +80,18 @@ class Ctx:
         return self.get("train_mask", f)
 
     def get(self, key, fn: Callable[[], Any]):
-        if key not in self._cache:
-            self._cache[key] = fn()
-        return self._cache[key]
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            return self._cache[key]
+        v = fn()  # may itself call get(); insert only after it returns
+        if key in self._cache:
+            return self._cache[key]
+        self._cache[key] = v
+        self._cache_bytes += _nbytes(v)
+        while self._cache_bytes > self.cache_mb * 2**20 and len(self._cache) > 1:
+            _, old = self._cache.popitem(last=False)
+            self._cache_bytes -= _nbytes(old)
+        return v
 
     # common indicators
     def atr(self, n=14):

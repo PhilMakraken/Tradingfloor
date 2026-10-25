@@ -131,3 +131,14 @@ def test_weekend_flat_on_every_timeframe(tf):
     assert len(tr) > 3
     for e, x in zip(tr.entry_time, tr.exit_time):
         assert x <= _next_friday_cutoff(e, "America/New_York", "16:50"), (tf, e, x)
+
+
+def test_ctx_cache_is_bounded_and_recomputes():
+    ctx = Ctx(resample(make_bars("2020-01-01", "2020-07-01", seed=7), "H1"), "EURUSD", "H1")
+    ctx.cache_mb = 1  # ~1 MB budget: continuous-param keys must not grow the memo forever
+    first = ctx.atr(14).copy()
+    for n in range(2, 400):
+        ctx.ma(n)
+    assert ctx._cache_bytes <= 2**20 or len(ctx._cache) == 1
+    assert len(ctx._cache) < 398
+    np.testing.assert_array_equal(ctx.atr(14), first)  # evicted entries are recomputed identically
