@@ -19,3 +19,4 @@ research/
 data/ideas/
 *.backup_*.sqlite
 data/ideas_*/
+trader/
