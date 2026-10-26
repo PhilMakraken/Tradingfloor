@@ -105,3 +105,13 @@ def test_sparse_trades_long_mc_do_not_overflow_timestamps(program):
     for c in ("exit_time", "mae_time", "mfe_time"):
         sparse[c] = sparse["entry_time"] + pd.Timedelta(hours=3)
     summarize(sim.evaluate(sparse, 3, 5, mc_len=2000), mc_only=True)  # used to raise OutOfBoundsDatetime
+
+
+def test_small_lucky_sample_scores_negative(program, monkeypatch):
+    data = {"EURUSD": make_bars("2019-01-01", "2019-06-01", seed=11)}
+    ev = Evaluator(Universe(data, timeframes=["H1"]), program, Gates(min_trades_is=40), quick_sims=5)
+    lucky = mk(np.r_[np.full(10, 22.0), np.full(26, -1.0)])  # 36 trades, ~+5.4R expectancy
+    monkeypatch.setattr(ev, "trades", lambda g, *a: lucky)
+    monkeypatch.setattr(ev, "split", lambda tr, sym: (tr, tr.iloc[:0]))
+    fit, _ = ev.quick(random_genome(np.random.default_rng(5), timeframes=["H1"]))
+    assert fit < 0  # below the trade-count gate: never above the candidate threshold or real strategies

@@ -91,7 +91,9 @@ class Evaluator:
         ts = trade_summary(r)
         info = {"is": ts}
         if ts["n"] < self.gates.min_trades_is or ts["expectancy_r"] <= 0:
-            fit = ts["expectancy_r"] * min(ts["n"], 50) / 50 - 1.0  # negative: guides search towards edge
+            # always negative: guides search towards edge; expectancy capped so a tiny lucky sample
+            # (e.g. 36 trades at +6R) cannot outrank strategies that clear the trade-count gate
+            fit = min(ts["expectancy_r"], 1.0) * min(ts["n"], 50) / 50 - 1.0
             return fit, info
         res = self.sim(g).evaluate(is_tr, n_windows=self.quick_sims // 3, n_mc=self.quick_sims, seed=self.seed,
                                    mc_len=max(len(is_tr) * 2, 600))
