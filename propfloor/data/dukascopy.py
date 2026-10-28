@@ -90,3 +90,53 @@ def encode_bi5(df: pd.DataFrame, day: date, symbol: str) -> bytes:
     out = b"".join(REC.pack(int((t - base).total_seconds()), round(r.open * scale), round(r.close * scale),
                             round(r.low * scale), round(r.high * scale), float(r.volume)) for t, r in df.iterrows())
     return lzma.compress(out, format=lzma.FORMAT_ALONE)
+
+
+TICK_URL = "https://datafeed.dukascopy.com/datafeed/{sym}/{y:04d}/{m:02d}/{d:02d}/{h:02d}h_ticks.bi5"
+
+
+def decode_ticks(raw: bytes, hour_start: pd.Timestamp, symbol: str) -> pd.DataFrame:
+    """Hourly tick file (20-byte records: uint32 ms-from-hour, uint32 ask, uint32 bid, float32 ask/bid volume)
+    -> 1-minute BID candles (the same price side as the daily candle files)."""
+    if not raw:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    arr = np.frombuffer(lzma.decompress(raw), dtype=np.dtype([("t", ">u4"), ("a", ">u4"), ("b", ">u4"),
+                                                              ("av", ">f4"), ("bv", ">f4")]))
+    t = hour_start + pd.to_timedelta(arr["t"].astype(np.int64), unit="ms")
+    s = pd.DataFrame({"p": arr["b"] / 10.0 ** digits(symbol), "v": arr["bv"].astype(float)}, index=pd.DatetimeIndex(t))
+    g = s.resample("1min")
+    df = pd.DataFrame({"open": g["p"].first(), "high": g["p"].max(), "low": g["p"].min(), "close": g["p"].last(),
+                       "volume": g["v"].sum()}).dropna()
+    df.index = df.index.as_unit("ns")
+    df.index.name = "time"
+    return df
+
+
+def fetch_hour(symbol: str, hour_start: pd.Timestamp, session: requests.Session | None = None) -> pd.DataFrame:
+    sym = symbol.upper()
+    h = pd.Timestamp(hour_start).tz_convert("UTC")
+    url = TICK_URL.format(sym=sym, y=h.year, m=h.month - 1, d=h.day, h=h.hour)
+    r = (session or requests.Session()).get(url, timeout=30)
+    if r.status_code == 404:
+        return decode_ticks(b"", h, sym)
+    r.raise_for_status()
+    return decode_ticks(r.content, h, sym)
+
+
+def recent(symbol: str, since: pd.Timestamp) -> pd.DataFrame:
+    """Near-real-time M1 bars since `since`: completed days from the daily candle files, today's completed hours
+    from the hourly tick files (Dukascopy publishes an hour shortly after it closes)."""
+    now = pd.Timestamp.now(tz="UTC")
+    today = now.normalize()
+    since = pd.Timestamp(since).tz_convert("UTC")
+    sess = requests.Session()
+    frames = []
+    if since < today:
+        frames.append(download(symbol, str(since.date()), str((today - pd.Timedelta(days=1)).date())))
+    h = max(today, since.floor("h"))
+    while h + pd.Timedelta(hours=1) <= now:
+        frames.append(fetch_hour(symbol, h, sess))
+        h += pd.Timedelta(hours=1)
+    frames = [f for f in frames if len(f)]
+    df = pd.concat(frames) if frames else pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    return df[df.index >= since] if len(df) else df

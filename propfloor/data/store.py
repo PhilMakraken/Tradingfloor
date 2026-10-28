@@ -14,6 +14,10 @@ log = logging.getLogger(__name__)
 DATA_DIR = Path("data/parquet")
 
 
+CCY = {"EUR", "GBP", "USD", "JPY", "AUD", "NZD", "CAD", "CHF", "SEK", "NOK", "DKK", "SGD", "HKD", "MXN", "ZAR",
+       "TRY", "PLN", "CNH", "XAU", "XAG"}
+
+
 def pip_size(symbol: str) -> float:
     s = symbol.upper()
     if s.endswith("JPY"):
@@ -22,7 +26,9 @@ def pip_size(symbol: str) -> float:
         return 0.1
     if s.startswith("XAG"):
         return 0.01
-    return 0.0001
+    if len(s) == 6 and s.isalpha() and s[:3] in CCY and s[3:] in CCY:
+        return 0.0001
+    return 0.01  # stocks, indices, oil: one cent / one index hundredth
 
 
 class DataStore:

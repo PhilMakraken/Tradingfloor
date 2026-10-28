@@ -9,7 +9,7 @@ description = "Autonomous prop-firm strategy research lab and virtual trading fl
 requires-python = ">=3.11"
 dependencies = [
   "pandas>=2.1", "numpy>=1.26", "pydantic>=2.5", "pyyaml>=6", "pyarrow>=14",
-  "numba>=0.59", "requests>=2.31",
+  "numba>=0.59", "scipy>=1.11", "requests>=2.31",
 ]
 
 [project.optional-dependencies]

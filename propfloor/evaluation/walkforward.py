@@ -11,7 +11,8 @@ import numpy as np
 import pandas as pd
 
 from propfloor.config import ProgramConfig
-from propfloor.data.clean import resample
+from propfloor.data.clean import TF_RULES, resample
+from propfloor.evaluation import robustness as rb
 from propfloor.evaluation.challenge import ChallengeSimulator, summarize
 from propfloor.evaluation.stats import deflated_sharpe, trade_summary
 from propfloor.strategies.blocks import TIMEFRAMES, Ctx
@@ -32,6 +33,14 @@ class Gates:
     max_degradation: float = 0.5  # OOS p_pass must be >= this share of IS p_pass
     min_cross_symbol_positive: float = 0.5  # share of other symbols with positive expectancy
     allow_synthetic: bool = False  # DEV ONLY: lets synthetic data validate (pipeline smoke tests)
+    # long-history requirement ("proven over N years") - checked on the full IS+OOS trade list
+    min_history_years: float = 0.0
+    min_positive_years: float = 0.0  # share of calendar years with positive total R
+    # Monte Carlo anti-overfitting tests (evaluation/robustness.py), run only once every other gate passed
+    robustness: bool = True
+    mc_min_p_profit: float = 0.95  # bootstrap P(total R > 0)
+    max_random_entry_p: float = 0.05  # permutation-test p-value vs random entries with the same exits
+    min_neighbour_positive: float = 0.6  # share of +/-15% parameter neighbours with positive IS expectancy
 
 
 @dataclass
@@ -51,14 +60,25 @@ class Universe:
         self.synthetic = synthetic or {}
         for sym, m1 in data.items():
             self.oos_start[sym] = m1.index[int(len(m1) * (1 - oos_frac))]
+            native = m1.index.to_series().diff().median() if len(m1) > 1 else pd.Timedelta(minutes=1)
             for tf in timeframes:
+                if tf_length(tf) < native * 0.9:
+                    continue  # e.g. daily-only stock history cannot make M15 bars
                 bars = m1 if tf == "M1" else resample(m1, tf)
                 self.ctx[(sym, tf)] = Ctx(bars, sym, tf)
                 self.ctx[(sym, tf)].train_end = self.oos_start[sym]
         for (sym, tf), c in self.ctx.items():  # intermarket blocks see the other symbols on the same timeframe
-            c.peers = {s: self.ctx[(s, tf)] for s in data if s != sym}
-        self.symbols = list(data)
+            c.peers = {s: self.ctx[(s, tf)] for s in data if s != sym and (s, tf) in self.ctx}
         self.timeframes = list(timeframes)
+        self.symbols = [s for s in data if self.tfs_for(s)]  # data coarser than every timeframe is unusable
+
+    def tfs_for(self, sym: str) -> list[str]:
+        return [tf for tf in self.timeframes if (sym, tf) in self.ctx]
+
+
+def tf_length(tf: str) -> pd.Timedelta:
+    rule = TF_RULES.get(tf.upper(), tf)
+    return pd.Timedelta(days=1) if rule == "D1" else pd.Timedelta(rule)
 
 
 class Evaluator:
@@ -158,6 +178,8 @@ class Evaluator:
         if others:
             pos = []
             for s in others:
+                if (s, g.tf) not in self.u.ctx:
+                    continue
                 o_is, _ = self.split(self.trades(g, s), s)
                 if len(o_is) >= 10:
                     pos.append(o_is["pnl_r"].mean() > 0)
@@ -167,4 +189,30 @@ class Evaluator:
                 m["specialised"] = True  # only tradable on its own symbol: flagged, OOS gates still apply
             elif m["cross_symbol_positive"] < G.min_cross_symbol_positive:
                 reasons.append("does not generalise to other symbols")
+        ctx = self.u.ctx[(g.symbol, g.tf)]
+        m["yearly"] = rb.yearly(tr, ctx.time[0], ctx.time[-1])
+        if m["yearly"]["years"] < G.min_history_years:
+            reasons.append(f"history {m['yearly']['years']:.1f}y < {G.min_history_years}y")
+        if m["yearly"]["positive_years"] < G.min_positive_years:
+            reasons.append(f"profitable in {m['yearly']['positive_years']:.0%} of years < {G.min_positive_years:.0%}")
+        if G.robustness and not reasons:
+            m["robustness"] = self.robustness(g, tr)
+            reasons += self._robustness_reasons(m["robustness"])
         return ValidationResult(not reasons, reasons, m)
+
+    def robustness(self, g: StrategyGenome, tr: pd.DataFrame | None = None, n_random: int = 100) -> dict:
+        tr = self.trades(g) if tr is None else tr
+        ctx = self.u.ctx[(g.symbol, g.tf)]
+        return {"bootstrap": rb.bootstrap(tr["pnl_r"].to_numpy(), seed=self.seed),
+                "random_entries": rb.random_entries(g, ctx, self.costs, n=n_random, seed=self.seed),
+                "neighbourhood": rb.neighbourhood(g, ctx, self.costs, seed=self.seed)}
+
+    def _robustness_reasons(self, r: dict) -> list[str]:
+        G, out = self.gates, []
+        if r["bootstrap"]["p_profit"] < G.mc_min_p_profit:
+            out.append(f"MC bootstrap P(profit) {r['bootstrap']['p_profit']:.2f} < {G.mc_min_p_profit}")
+        if r["random_entries"]["p_value"] > G.max_random_entry_p:
+            out.append(f"not better than random entries (p={r['random_entries']['p_value']:.2f})")
+        if r["neighbourhood"]["positive_share"] < G.min_neighbour_positive:
+            out.append(f"parameter neighbourhood fragile ({r['neighbourhood']['positive_share']:.0%} positive)")
+        return out

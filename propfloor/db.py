@@ -45,6 +45,11 @@ CREATE TABLE IF NOT EXISTS floor_accounts (
     start_balance REAL, balance REAL, equity REAL, floor REAL, daily_floor REAL,
     payouts REAL DEFAULT 0, violation TEXT, created_at TEXT, updated_at TEXT, state TEXT
 );
+CREATE TABLE IF NOT EXISTS forward_tests (
+    id TEXT PRIMARY KEY, started TEXT, updated TEXT, status TEXT,  -- probation | confirmed | degraded | failed
+    n_trades INTEGER DEFAULT 0, expectancy REAL DEFAULT 0, total_r REAL DEFAULT 0, max_dd_r REAL DEFAULT 0,
+    longevity REAL DEFAULT 0, bt_expectancy REAL, bt_maxdd_p95 REAL, train_end TEXT, detail TEXT
+);
 CREATE TABLE IF NOT EXISTS floor_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT, account_id TEXT, kind TEXT, detail TEXT
 );

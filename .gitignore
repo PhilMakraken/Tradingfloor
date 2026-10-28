@@ -19,3 +19,7 @@ research/
 data/ideas/
 *.backup_*.sqlite
 data/ideas_*/
+data/live/
+data/agents/
+data/RESEARCH_NOTES.md
+data/FOUND_STRATEGIES.md

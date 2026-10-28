@@ -17,6 +17,7 @@ import numpy as np
 
 from propfloor.db import ResultsDB, now
 from propfloor.evaluation.walkforward import Evaluator
+from propfloor.factory.notes import FOUND, NOTES, report_found, write_notes
 from propfloor.strategies.genome import StrategyGenome, crossover, mutate, random_genome
 
 log = logging.getLogger(__name__)
@@ -26,7 +27,8 @@ class Factory:
     def __init__(self, evaluator: Evaluator, db: ResultsDB, seed: int | None = None, pop_size: int = 40,
                  elite: int = 12, random_frac: float = 0.5, candidate_threshold: float = 0.15, per_family: int = 2,
                  llm=None, llm_every: int = 10, llm_n: int = 8,
-                 idea_dir: str | None = "data/ideas") -> None:
+                 idea_dir: str | None = "data/ideas", notes_every: int = 5, notes_dir: str = "data", forward=None,
+                 forward_every_min: float = 60.0) -> None:
         self.ev = evaluator
         self.db = db
         self.rng = np.random.default_rng(seed)
@@ -41,6 +43,11 @@ class Factory:
         self.generation = int(db.get_meta("generation", 0))
         self.idea_dir: Path | None = Path(idea_dir) if idea_dir else None
         self._pending_files: list[Path] = []
+        self.notes_every = notes_every
+        self.notes_dir = Path(notes_dir)
+        self.forward = forward  # live.forward.ForwardTester: validated strategies get paper-tested on new data
+        self.forward_every = forward_every_min * 60
+        self._last_forward = 0.0
         self.symbols = evaluator.u.symbols
         self.tfs = evaluator.u.timeframes
 
@@ -129,7 +136,8 @@ class Factory:
         if self.db.has(sid):
             return None
         g.symbol = g.symbol if g.symbol in self.symbols else self.symbols[0]
-        g.tf = g.tf if g.tf in self.tfs else self.tfs[0]
+        tfs = self.ev.u.tfs_for(g.symbol)
+        g.tf = g.tf if g.tf in tfs else tfs[-1]  # coarsest available (daily-only histories)
         try:
             fit, info = self.ev.quick(g)
         except Exception as e:  # noqa: BLE001 - a broken genome must never stop the factory
@@ -150,6 +158,9 @@ class Factory:
             daily = tr.groupby(tr.exit_time.dt.strftime("%Y-%m-%d"))["pnl_r"].sum().to_dict()
             self.db.save_returns(sid, {k: float(v) for k, v in daily.items()})
             log.info("VALIDATED %s  OOS P(pass)=%.2f  %s", sid, res.metrics["challenge_oos"]["p_pass_all"], g.describe())
+            report_found(sid, g.describe(), res.metrics, self.notes_dir / FOUND.name)
+            if self.forward is not None:
+                self.forward.enroll(sid, res.metrics, self.ev.u.oos_start.get(g.symbol))
         return res.validated
 
     def step(self) -> dict:
@@ -164,6 +175,15 @@ class Factory:
                     f.rename(done / f.name)
         self.generation += 1
         self.db.set_meta("generation", self.generation)
+        if self.notes_every and self.generation % self.notes_every == 0:
+            write_notes(self.db, self.notes_dir / NOTES.name)
+        if self.forward is not None and time.time() - self._last_forward >= self.forward_every:
+            self._last_forward = time.time()
+            try:
+                for r in self.forward.run_once():
+                    log.info("forward %(id)s %(status)s trades=%(n_trades)d exp=%(expectancy).3f longevity=%(longevity)s", r)
+            except Exception:  # noqa: BLE001 - live feeds fail; research goes on
+                log.exception("forward test poll failed")
         stats = {"generation": self.generation, "evaluated": len(fits), "best": max(fits, default=None),
                  "trials": self.db.n_trials, "validated": len(self.db.validated()), "secs": round(time.time() - t0, 1)}
         log.info("gen %(generation)d: evaluated %(evaluated)d best=%(best)s trials=%(trials)d validated=%(validated)d (%(secs)ss)", stats)
